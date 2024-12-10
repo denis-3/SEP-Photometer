@@ -1,6 +1,6 @@
 # Get a lightcurve from a folder of FITs files
 
-import sep
+import sep_pjw as sep
 from astropy.io import fits
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
@@ -14,6 +14,7 @@ import numpy as np
 import random
 import sys
 import time
+random.seed(int(time.time()))
 
 # Whether or not to use command line args
 USE_CLI_ARGS = True
@@ -176,7 +177,7 @@ def sky_bg_from_annulus(data, cx, cy, r, dr):
 		for x in range(int(cx - (r + dr) - 1), int(cx + (r + dr) + 2)):
 			if annulus_mask[y][x]:
 				annulus_pixels.append(data[y][x])
-	cutoff = np.percentile(annulus_pixels, 95)
+	cutoff = np.percentile(annulus_pixels, 99)
 	for i in range(len(annulus_pixels)-1, -1, -1):
 		if annulus_pixels[i] > cutoff:
 			del annulus_pixels[i]
@@ -202,6 +203,8 @@ for (_, _, filenames) in walk(FILE_FOLDER_PATH):
 # 	RANDOM_INSPECTION = FILE_FOLDER_PATH + random.choice(fits_filenames)
 
 START_TIME = int(time.time())
+RAW_TARGET_FLUX = []
+RAW_COMPS_FLUX = []
 for file_name in fits_filenames:
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
@@ -223,29 +226,29 @@ for file_name in fits_filenames:
 			fits_data = real_hdul.data
 		sep_bkg = sep.Background(fits_data)
 		sep_bkg_err = sep_bkg.globalrms
-		# data_minus_bg = fits_data - bkg_sep
+		# data_minus_bg = fits_data - sep_bkg
 		data_minus_bg = fits_data
 
 		target_x, target_y, _ = sep.winpos(data_minus_bg, [target_x], [target_y], [3.33])
 		target_x = target_x[0]
 		target_y = target_y[0]
 
-		# local target background
-		loc_tgt_bg = sky_bg_from_annulus(data_minus_bg, target_x, target_y, 14, 10)
-		loc_data_minus_bg = data_minus_bg - loc_tgt_bg
-		kron_rad = sep.flux_radius(loc_data_minus_bg, [target_x], [target_y], [11], 0.85)[0][0]
+		kron_rad, kr_flag = sep.kron_radius(data_minus_bg, [target_x], [target_y], [6], [6], [0], [6])
 
-		target_flux, target_err, t_flag = sep.sum_circle(loc_data_minus_bg, [target_x], [target_y], [kron_rad], err=sep_bkg_err)
-		if t_flag[0] !=0:
-			print("\nSEP error with target star aperture photometry, got a non-zero flag:", t_flag[0])
+		if kr_flag[0] != 0:
+			print("\nSEP raised a non-zero flag for target star kron radius: ", kr_flag[0])
+			exit(kr_flag[0])
+		kron_rad = kron_rad[0]
+
+		target_flux, target_err, t_flag = sep.sum_circle(data_minus_bg, [target_x], [target_y], [kron_rad],
+			err=sep_bkg_err, bkgann=(kron_rad+2, kron_rad+10))
+		if t_flag[0] != 0:
+			print("\nSEP raised a non-zero flag for targetg star photometry:", t_flag[0])
 			exit(t_flag[0])
 		target_flux = target_flux[0]
 		target_err = target_err[0]
 		if VERBOSE == True:
 			print("Target X Y coords and radius", target_x, target_y, kron_rad)
-
-		# kron_rad = sep.kron_radius(data_minus_bg, [target_x], [target_y], 20, 20, 0, 6.0)[0][0] * 1.4
-		# target_flux, fluxerr, _ = sep.sum_circle(data_minus_bg, [target_x], [target_y], kron_rad[0], subpix=1)
 
 		target_mag = 0 # only for mag mode
 		total_comp_err = 0
@@ -261,20 +264,24 @@ for file_name in fits_filenames:
 			comp_x = comp_x[0]
 			comp_y = comp_y[0]
 
-			loc_cmp_bg = sky_bg_from_annulus(data_minus_bg, comp_x, comp_y, 14, 10)
-			loc_data_minus_bg = data_minus_bg - loc_cmp_bg
+			comp_krad, ckr_flag = sep.kron_radius(data_minus_bg, [comp_x], [comp_y], [6], [6], [0], [6])
 
-			comp_krad = sep.flux_radius(loc_data_minus_bg, [comp_x], [comp_y], [11], 0.85)[0][0]
-			comp_flux, comp_err, c_flag = sep.sum_circle(loc_data_minus_bg, [comp_x], [comp_y], [comp_krad], err=sep_bkg_err)
+			if ckr_flag[0] != 0:
+				print(f"\nSEP raised a non-zero flag for comp star {i} kron radius: ", ckr_flag[0])
+				exit(ckr_flag[0])
+			comp_krad = comp_krad[0]
+
+			comp_flux, comp_err, c_flag = sep.sum_circle(data_minus_bg, [comp_x], [comp_y], [comp_krad],
+				err=sep_bkg_err, bkgann=(comp_krad+2, comp_krad+10))
 			if c_flag[0] !=0:
-				print(f"\nSEP error with comp star {i+1} aperture photometry, got a non-zero flag:", c_flag[0])
+				print(f"\nSEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
 				exit(t_flag[0])
 			comp_flux = comp_flux[0]
 			comp_err = comp_err[0]
-			# comp_krad = sep.kron_radius(data_minus_bg, [comp_x], [comp_y], 20, 20, 0, 6.0)[0][0] * 1.4
-			# comp_flux, comp_ferr, _ = sep.sum_circle(data_minus_bg, [comp_x], [comp_y], comp_krad, subpix=1)
+
 			if VERBOSE == True:
 				print("Comp X Y coords and radius", comp_x, comp_y, comp_krad)
+
 			circ2 = Circle((comp_x, comp_y), comp_krad, color="r", fill=False)
 			mat_patches.append(circ2)
 			if MAG_MODE == True:
@@ -290,8 +297,8 @@ for file_name in fits_filenames:
 			ratio = target_mag
 			total_target_err = 2.5 / math.log(10) * total_target_err
 
-		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 0.03:
-			plt.imshow(data_minus_bg-loc_tgt_bg, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
+		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 0.02:
+			plt.imshow(data_minus_bg, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
 			plt.colorbar()
 			circ = Circle((target_x, target_y), kron_rad, color="b", fill=False)
 			ax = plt.gca()
@@ -300,6 +307,7 @@ for file_name in fits_filenames:
 				ax.add_patch(p)
 			plt.show()
 			RANDOM_INSPECTION = False
+			plt.clf()
 
 		mid_photo_time = 0
 		if "MJD-OBS" in real_hdul.header:
@@ -315,6 +323,8 @@ for file_name in fits_filenames:
 		FLUX_RATIO.append(ratio)
 		FLUX_RATIO_ERR.append(total_target_err)
 		TARGET_PIX = [target_x, target_y]
+		RAW_TARGET_FLUX.append(target_flux)
+		RAW_COMPS_FLUX.append(total_comp_flux)
 		print()
 
 # sort all the data points by MJD so it can be displayed easily
@@ -342,15 +352,22 @@ for data_set in COMBINED_DATA:
 the_s = "s" if len(COMPS_SKYCOORD) > 1 else ""
 
 ylabel = f"Flux ratio (target / comp{the_s})" if MAG_MODE == False else "Mangitude"
-
-plt.scatter(MJD, FLUX_RATIO, marker="o", color="green", s=15)
-plt.errorbar(MJD, FLUX_RATIO, yerr=FLUX_RATIO_ERR, linewidth=0, elinewidth=1.5, ecolor="grey")
 plt.title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}")
-plt.xlabel("Time (Days)")
-plt.ylabel(ylabel)
+ax = plt.gca()
+ax.scatter(MJD, FLUX_RATIO, marker="o", color="green", s=15)
+ax.errorbar(MJD, FLUX_RATIO, yerr=FLUX_RATIO_ERR, linewidth=0, elinewidth=1.5, ecolor="grey")
+ax.set_xlabel("Time (Days)")
+ax.set_ylabel(ylabel)
 
 END_TIME = int(time.time())
 TOTAL_TIME = END_TIME - START_TIME
 print(f"Complete! That took {TOTAL_TIME} seconds")
 
 plt.show()
+
+# debug plots showing raw flux of target and comp stars
+# fig, axs = plt.subplots(2)
+# fig.suptitle("Raw-Flux vs Time of Target Star, Comp Star")
+# axs[0].scatter(MJD, RAW_TARGET_FLUX, marker="o", color="purple", s=15)
+# axs[1].scatter(MJD, RAW_COMPS_FLUX, marker="o", color="blue", s=15)
+# plt.show()
