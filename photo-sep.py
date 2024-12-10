@@ -102,7 +102,7 @@ if USE_CLI_ARGS:
 	TARGET_PIX = [-1, -1]
 	COMPS_RA, COMPS_DEC = [""], [""]
 	COMPS_PIX = [[-1, -1]]
-	VERBOSE, MAG_MODE, RANDOM_INSPECTION, EXPORT_CSV = (False,)*5
+	VERBOSE, MAG_MODE, RANDOM_INSPECTION, EXPORT_CSV = (False,)*4
 	req_var_set = 7 # required variable sets
 	i = 1
 	while i < len(sys.argv):
@@ -329,14 +329,15 @@ FLUX_RATIO_ERR = []
 COMBINED_DATA = sorted(COMBINED_DATA, key=(lambda x: x[0]))
 if EXPORT_CSV == True:
 	with open(EXPORT_PATH, "a") as data_file:
-		data_file.write("MJD,Flux Ratio\n")
+		data_title = "Magnitude" if MAG_MODE == True else "Flux ratio"
+		data_file.write(f"MJD,{data_title},Uncertainty\n")
 for data_set in COMBINED_DATA:
 	MJD.append(data_set[0])
 	FLUX_RATIO.append(data_set[1])
 	FLUX_RATIO_ERR.append(data_set[2])
 	if EXPORT_CSV == True:
 		with open(EXPORT_PATH, "a") as data_file:
-			data_file.write("{},{}\n".format(data_set[0], data_set[1]))
+			data_file.write("{},{},{}\n".format(data_set[0], data_set[1], data_set[2]))
 
 the_s = "s" if len(COMPS_SKYCOORD) > 1 else ""
 
