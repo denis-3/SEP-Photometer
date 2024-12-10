@@ -13,6 +13,7 @@ import math
 import numpy as np
 import random
 import sys
+import time
 
 # Whether or not to use command line args
 USE_CLI_ARGS = True
@@ -52,6 +53,9 @@ EXPORT_PATH = f"./{STAR_NAME.lower().replace(" ", "-")}-{FILTER.lower()}.csv"
 TARGET_RA = "06 48 47.168"
 TARGET_DEC = "-02 53 53.26"
 
+# if no WCS, insert the initial x, y pixel values of the target star here
+TARGET_PIX = [-1, -1]
+
 # ~~~ Choose a comp(s) ~~~ #
 
 # HD 312084
@@ -87,14 +91,18 @@ TARGET_DEC = "-02 53 53.26"
 # For CoRoT-1 b
 COMPS_RA = ["06 48 22.111"]
 COMPS_DEC = ["-03 05 15.78"]
-COMPS_MAG = [13.4]
+COMPS_MAG = [12.7]
+
+# if no WCS, insert the initial x, y pixel values of the comp star(s) here
+COMPS_PIX = [[-1, -1]]
 
 
 if USE_CLI_ARGS:
-	VERBOSE = False
-	MAG_MODE = False
-	RANDOM_INSPECTION = False
-	EXPORT_CSV = False
+	TARGET_RA, TARGET_DEC = "", ""
+	TARGET_PIX = [-1, -1]
+	COMPS_RA, COMPS_DEC = [""], [""]
+	COMPS_PIX = [[-1, -1]]
+	VERBOSE, MAG_MODE, RANDOM_INSPECTION, EXPORT_CSV = (False,)*5
 	req_var_set = 7 # required variable sets
 	i = 1
 	while i < len(sys.argv):
@@ -110,10 +118,14 @@ if USE_CLI_ARGS:
 			TARGET_RA = sys.argv[i+1]
 		elif t_f == "--tdec": # target star Dec
 			TARGET_DEC = sys.argv[i+1]
+		elif t_f == "--tpix": # target pixel values, separated by space
+			TARGET_PIX = map(float, sys.argv[i+1].split(","))
 		elif t_f == "--cra": # comp star RA
 			COMPS_RA = [sys.argv[i+1]]
 		elif t_f == "--cdec": # comp star Dec
 			COMPS_DEC = [sys.argv[i+1]]
+		elif t_f == "--cpix": # comparison star pixel values, separated by space
+			COMPS_PIX = [map(float, sys.argv[i+1].split(","))]
 		elif t_f == "-i": # whether or not to do inspection
 			RANDOM_INSPECTION = True
 			req_var_set += 1
@@ -131,6 +143,12 @@ if USE_CLI_ARGS:
 		i += 2
 	if req_var_set > 0:
 		print("Not all required flags have been set!")
+		exit(1)
+	elif TARGET_RA == "" and TARGET_DEC == "" and TARGET_PIX == [-1, -1]:
+		print("Target star position has not been set")
+		exit(1)
+	elif COMPS_RA == [""] and COMPS_DEC == [""] and COMPS_PIX == [[-1, -1]]:
+		print("Comparison star position has not been set")
 		exit(1)
 
 print("Initializing SEP photometer with these settings:")
@@ -183,6 +201,7 @@ for (_, _, filenames) in walk(FILE_FOLDER_PATH):
 # if RANDOM_INSPECTION == True:
 # 	RANDOM_INSPECTION = FILE_FOLDER_PATH + random.choice(fits_filenames)
 
+START_TIME = int(time.time())
 for file_name in fits_filenames:
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
@@ -192,12 +211,18 @@ for file_name in fits_filenames:
 		if real_hdul.header["filter"].strip() != FILTER or "-e00." in file_name:
 			continue
 		print("Opening file path", file_path)
+		use_wcs = True
 		this_wcs = WCS(real_hdul.header)
-		target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
+		if this_wcs.wcs.ctype == ["", ""]:
+			target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
+		else:
+			use_wcs = False
+			target_x, target_y = TARGET_PIX
 		fits_data = real_hdul.data.byteswap().newbyteorder()
 		if file_name.endswith(".fits.fz"):
 			fits_data = real_hdul.data
-		# bkg_sep = sep.Background(fits_data)
+		sep_bkg = sep.Background(fits_data)
+		sep_bkg_err = sep_bkg.globalrms
 		# data_minus_bg = fits_data - bkg_sep
 		data_minus_bg = fits_data
 
@@ -208,22 +233,30 @@ for file_name in fits_filenames:
 		# local target background
 		loc_tgt_bg = sky_bg_from_annulus(data_minus_bg, target_x, target_y, 14, 10)
 		loc_data_minus_bg = data_minus_bg - loc_tgt_bg
-		kron_rad = sep.flux_radius(loc_data_minus_bg, [target_x], [target_y], [11], 0.9)[0][0]
+		kron_rad = sep.flux_radius(loc_data_minus_bg, [target_x], [target_y], [11], 0.85)[0][0]
 
-		target_flux, fluxerr, _ = sep.sum_circle(loc_data_minus_bg, [target_x], [target_y], [kron_rad], subpix=10)
+		target_flux, target_err, t_flag = sep.sum_circle(loc_data_minus_bg, [target_x], [target_y], [kron_rad], err=sep_bkg_err)
+		if t_flag[0] !=0:
+			print("\nSEP error with target star aperture photometry, got a non-zero flag:", t_flag[0])
+			exit(t_flag[0])
+		target_flux = target_flux[0]
+		target_err = target_err[0]
 		if VERBOSE == True:
 			print("Target X Y coords and radius", target_x, target_y, kron_rad)
 
 		# kron_rad = sep.kron_radius(data_minus_bg, [target_x], [target_y], 20, 20, 0, 6.0)[0][0] * 1.4
 		# target_flux, fluxerr, _ = sep.sum_circle(data_minus_bg, [target_x], [target_y], kron_rad[0], subpix=1)
 
+		target_mag = 0 # only for mag mode
 		total_comp_err = 0
 		total_comp_flux = 0 # total comp flux is used for both ADU counts and magnitude
-		target_mag = 0 # only for mag mode
 		mat_patches = [] # matplotlib patches
 		for i in range(len(COMPS_SKYCOORD)):
 			comp_coord = COMPS_SKYCOORD[i]
-			comp_x, comp_y = this_wcs.world_to_pixel(comp_coord)
+			if use_wcs:
+				comp_x, comp_y = this_wcs.world_to_pixel(comp_coord)
+			else:
+				comp_x, comp_y = COMPS_PIX[i]
 			comp_x, comp_y, _ = sep.winpos(data_minus_bg, [comp_x], [comp_y], [3.33])
 			comp_x = comp_x[0]
 			comp_y = comp_y[0]
@@ -231,32 +264,31 @@ for file_name in fits_filenames:
 			loc_cmp_bg = sky_bg_from_annulus(data_minus_bg, comp_x, comp_y, 14, 10)
 			loc_data_minus_bg = data_minus_bg - loc_cmp_bg
 
-			comp_krad = sep.flux_radius(loc_data_minus_bg, [comp_x], [comp_y], [11], 0.9)[0][0]
-			comp_flux, comp_ferr, _ = sep.sum_circle(loc_data_minus_bg, [comp_x], [comp_y], [comp_krad], subpix=10)
+			comp_krad = sep.flux_radius(loc_data_minus_bg, [comp_x], [comp_y], [11], 0.85)[0][0]
+			comp_flux, comp_err, c_flag = sep.sum_circle(loc_data_minus_bg, [comp_x], [comp_y], [comp_krad], err=sep_bkg_err)
+			if c_flag[0] !=0:
+				print(f"\nSEP error with comp star {i+1} aperture photometry, got a non-zero flag:", c_flag[0])
+				exit(t_flag[0])
+			comp_flux = comp_flux[0]
+			comp_err = comp_err[0]
 			# comp_krad = sep.kron_radius(data_minus_bg, [comp_x], [comp_y], 20, 20, 0, 6.0)[0][0] * 1.4
 			# comp_flux, comp_ferr, _ = sep.sum_circle(data_minus_bg, [comp_x], [comp_y], comp_krad, subpix=1)
 			if VERBOSE == True:
 				print("Comp X Y coords and radius", comp_x, comp_y, comp_krad)
-
 			circ2 = Circle((comp_x, comp_y), comp_krad, color="r", fill=False)
 			mat_patches.append(circ2)
 			if MAG_MODE == True:
 				this_comp_mag = COMPS_MAG[i]
-				this_target_mag = this_comp_mag - 2.5 * math.log10(target_flux[0] / comp_flux[0])
+				this_target_mag = this_comp_mag - 2.5 * math.log10(target_flux / comp_flux)
 				target_mag += this_target_mag / len(COMPS_RA)
-				total_comp_flux += this_comp_mag / len(COMPS_RA)
-				total_comp_err = 0
-			else:
-				total_comp_flux += comp_flux[0]
-				total_comp_err += comp_ferr[0]
+			total_comp_flux += comp_flux
+			total_comp_err += comp_err
+			COMPS_PIX[i] = [comp_x, comp_y]
+		total_target_err = math.sqrt((target_err / target_flux) ** 2 + (total_comp_err / total_comp_flux)**2)
+		ratio = target_flux / total_comp_flux
 		if MAG_MODE == True:
 			ratio = target_mag
-		else:
-			ratio = target_flux[0] / total_comp_flux
-		# total_err = (target_flux[0] + fluxerr[0]) / (total_comp_flux + total_comp_err)
-		# total_err -= (target_flux[0] - fluxerr[0]) / (total_comp_flux - total_comp_err)
-		# total_err = abs(total_err)
-		total_err = 0
+			total_target_err = 2.5 / math.log(10) * total_target_err
 
 		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 0.03:
 			plt.imshow(data_minus_bg-loc_tgt_bg, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
@@ -274,12 +306,15 @@ for file_name in fits_filenames:
 			mid_photo_time = real_hdul.header["MJD-OBS"]
 		elif "DATE-AVG" in real_hdul.header:
 			mid_photo_time = Time(real_hdul.header["DATE-AVG"]).jd
+		elif "DATE-OBS" in real_hdul.header:
+			mid_photo_time = Time(real_hdul.header["DATE-OBS"]).jd
 		else:
 			print("\nNo suitable date header found!!! :(")
 			exit()
 		MJD.append(mid_photo_time)
 		FLUX_RATIO.append(ratio)
-		FLUX_RATIO_ERR.append(total_err)
+		FLUX_RATIO_ERR.append(total_target_err)
+		TARGET_PIX = [target_x, target_y]
 		print()
 
 # sort all the data points by MJD so it can be displayed easily
@@ -298,10 +333,7 @@ if EXPORT_CSV == True:
 for data_set in COMBINED_DATA:
 	MJD.append(data_set[0])
 	FLUX_RATIO.append(data_set[1])
-	if MAG_MODE == True:
-		FLUX_RATIO_ERR.append(0)
-	else:
-		FLUX_RATIO_ERR.append(data_set[2])
+	FLUX_RATIO_ERR.append(data_set[2])
 	if EXPORT_CSV == True:
 		with open(EXPORT_PATH, "a") as data_file:
 			data_file.write("{},{}\n".format(data_set[0], data_set[1]))
@@ -310,9 +342,14 @@ the_s = "s" if len(COMPS_SKYCOORD) > 1 else ""
 
 ylabel = f"Flux ratio (target / comp{the_s})" if MAG_MODE == False else "Mangitude"
 
-plt.plot(MJD, FLUX_RATIO, marker="o", color="green", linewidth=0)
-# plt.errorbar(MJD, FLUX_RATIO, yerr=FLUX_RATIO_ERR, linewidth=0, elinewidth=2, ecolor="red")
+plt.scatter(MJD, FLUX_RATIO, marker="o", color="green", s=15)
+plt.errorbar(MJD, FLUX_RATIO, yerr=FLUX_RATIO_ERR, linewidth=0, elinewidth=1.5, ecolor="grey")
 plt.title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}")
 plt.xlabel("Time (Days)")
 plt.ylabel(ylabel)
+
+END_TIME = int(time.time())
+TOTAL_TIME = END_TIME - START_TIME
+print(f"Complete! That took {TOTAL_TIME} seconds")
+
 plt.show()

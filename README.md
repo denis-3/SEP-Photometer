@@ -16,8 +16,10 @@ The program can be used with the following command line options. An asterisk **\
 * `--tname`**\***: Name of the target star (only used for the title on the graph).
 * `--tra`**\***: The Right Ascension of the target star, in `HH MM SS.SS`. The hours, minutes, and seconds components must be separated by a space. E.g. `12 34 56.78`
 * `--tdec`**\***: Declination of the target star, in `DD MM SS.SS`. The degree, minutes, and seconds components must be separated by a space. E.g. `-65 43 21.09`
+* `--tpix`**\***: The x and y pixel values of the target star, if no WCS is available. It should be input as a string with the format `"x, y"`, e.g. `"100, 200"`. Only required if the `--tra` and `--tdec` parameters are not set.
 * `--cra`**\***: Right Ascension of the comparison star. It has the same format as `--tra`.
 * `--cdec`**\***: Declination of the comparison star. It has the same format as `--tdec`.
+* `--cpix`**\***: The x and y pixel values of the comparison star, if no WCS is available. It should be input as a string with the format `"x, y"`, e.g. `"200, 300"`.
 * `--cmag`: The magnitude of the comparison star. If this option is omitted, the code will output a flux ratio.
 * `-i`: Include this parameter to "inspect" one of the images at random. A graph will show up, displaying the star field and circles around the target and comparison star(s), which can be manually examined for fit. The blue circle represents the aperture around the target star, and the red circle likewise for the comparison star(s).
 * `-v`: "Verbose;" include this parameter to output extra information in the console.
