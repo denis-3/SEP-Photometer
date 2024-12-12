@@ -38,24 +38,11 @@ EXPORT_PATH = f"./{STAR_NAME.lower().replace(" ", "-")}-{FILTER.lower()}.csv"
 # TARGET_RA = "12 53 46.9935752640"
 # TARGET_DEC = "-60 18 35.656553808"
 
-# WASP 164 b
-# TARGET_RA = "22 59 29.67"
-# TARGET_DEC = "-60 26 52.26"
-
-# WASP 164 b Long period variable - ASAS J225857-6028.8
-# TARGET_RA = "22 58 57.334"
-# TARGET_DEC = "-60 28 48.72"
-
-# CoRoT-1 b
-# TARGET_RA = "06 48 19.172"
-# TARGET_DEC = "-03 06 07.86"
-
-# V0982 Mon (near CoRoT-1 b)
-TARGET_RA = "06 48 47.168"
-TARGET_DEC = "-02 53 53.26"
+TARGET_RA = ""
+TARGET_DEC = ""
 
 # if no WCS, insert the initial x, y pixel values of the target star here
-TARGET_PIX = [-1, -1]
+TARGET_PIX = [0, 0]
 
 # ~~~ Choose a comp(s) ~~~ #
 
@@ -84,18 +71,12 @@ TARGET_PIX = [-1, -1]
 # COMPS_MAG_V = [9.339, 9.754, 9.313]
 # COMPS_MAG_up = [10.46, 10.86, 10.57]
 
-# For WASP-164 b
-# COMPS_RA = ["22 59 48.334"]#, "22 59 54.413", "23 00 36"]
-# COMPS_DEC = ["-60 30 59.52"]#, "-60 31 18.61", "-60 21 58.18"]
-# COMPS_MAG = [11.767]
-
-# For CoRoT-1 b
-COMPS_RA = ["06 48 22.111"]
-COMPS_DEC = ["-03 05 15.78"]
-COMPS_MAG = [12.7]
+COMPS_RA = [""]
+COMPS_DEC = [""]
+COMPS_MAG = [0]
 
 # if no WCS, insert the initial x, y pixel values of the comp star(s) here
-COMPS_PIX = [[-1, -1]]
+COMPS_PIX = [[0, 0]]
 
 
 if USE_CLI_ARGS:
@@ -216,7 +197,7 @@ for file_name in fits_filenames:
 		print("Opening file path", file_path)
 		use_wcs = True
 		this_wcs = WCS(real_hdul.header)
-		if this_wcs.wcs.ctype == ["", ""]:
+		if this_wcs.wcs.ctype[0] != "":
 			target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
 		else:
 			use_wcs = False
@@ -226,22 +207,23 @@ for file_name in fits_filenames:
 			fits_data = real_hdul.data
 		sep_bkg = sep.Background(fits_data)
 		sep_bkg_err = sep_bkg.globalrms
-		# data_minus_bg = fits_data - sep_bkg
-		data_minus_bg = fits_data
 
-		target_x, target_y, _ = sep.winpos(data_minus_bg, [target_x], [target_y], [3.33])
+		target_x, target_y, _ = sep.winpos(fits_data, [target_x], [target_y], [3.33])
 		target_x = target_x[0]
 		target_y = target_y[0]
 
-		kron_rad, kr_flag = sep.kron_radius(data_minus_bg, [target_x], [target_y], [6], [6], [0], [6])
+		# optimize radius from flux_radius and kron_radius
+		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 12, 8)
+		init_rad = sep.flux_radius(fits_data - loc_sky_bg, [target_x], [target_y], [12], 0.66)[0][0]
+		kron_rad, kr_flag = sep.kron_radius(fits_data, [target_x], [target_y], [2*init_rad], [2*init_rad], [0], [6])
 
 		if kr_flag[0] != 0:
 			print("\nSEP raised a non-zero flag for target star kron radius: ", kr_flag[0])
 			exit(kr_flag[0])
-		kron_rad = kron_rad[0]
+		kron_rad = kron_rad[0] * 1.35
 
-		target_flux, target_err, t_flag = sep.sum_circle(data_minus_bg, [target_x], [target_y], [kron_rad],
-			err=sep_bkg_err, bkgann=(kron_rad+2, kron_rad+10))
+		target_flux, target_err, t_flag = sep.sum_circle(fits_data, [target_x], [target_y], [kron_rad],
+			err=sep_bkg_err, bkgann=(kron_rad+4, kron_rad+12))
 		if t_flag[0] != 0:
 			print("\nSEP raised a non-zero flag for targetg star photometry:", t_flag[0])
 			exit(t_flag[0])
@@ -254,25 +236,27 @@ for file_name in fits_filenames:
 		total_comp_err = 0
 		total_comp_flux = 0 # total comp flux is used for both ADU counts and magnitude
 		mat_patches = [] # matplotlib patches
-		for i in range(len(COMPS_SKYCOORD)):
-			comp_coord = COMPS_SKYCOORD[i]
+		for i in range(max(len(COMPS_SKYCOORD),len(COMPS_PIX))):
 			if use_wcs:
+				comp_coord = COMPS_SKYCOORD[i]
 				comp_x, comp_y = this_wcs.world_to_pixel(comp_coord)
 			else:
 				comp_x, comp_y = COMPS_PIX[i]
-			comp_x, comp_y, _ = sep.winpos(data_minus_bg, [comp_x], [comp_y], [3.33])
+			comp_x, comp_y, _ = sep.winpos(fits_data, [comp_x], [comp_y], [3.33])
 			comp_x = comp_x[0]
 			comp_y = comp_y[0]
 
-			comp_krad, ckr_flag = sep.kron_radius(data_minus_bg, [comp_x], [comp_y], [6], [6], [0], [6])
+			loc_sky_bg = sky_bg_from_annulus(fits_data, comp_x, comp_y, 12, 8)
+			init_rad = sep.flux_radius(fits_data - loc_sky_bg, [comp_x], [comp_y], [12], 0.66)[0][0]
+			comp_krad, ckr_flag = sep.kron_radius(fits_data, [comp_x], [comp_y], [2*init_rad], [2*init_rad], [0], [6])
 
 			if ckr_flag[0] != 0:
 				print(f"\nSEP raised a non-zero flag for comp star {i} kron radius: ", ckr_flag[0])
 				exit(ckr_flag[0])
-			comp_krad = comp_krad[0]
+			comp_krad = comp_krad[0] * 1.35
 
-			comp_flux, comp_err, c_flag = sep.sum_circle(data_minus_bg, [comp_x], [comp_y], [comp_krad],
-				err=sep_bkg_err, bkgann=(comp_krad+2, comp_krad+10))
+			comp_flux, comp_err, c_flag = sep.sum_circle(fits_data, [comp_x], [comp_y], [comp_krad],
+				err=sep_bkg_err, bkgann=(comp_krad+4, comp_krad+12))
 			if c_flag[0] !=0:
 				print(f"\nSEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
 				exit(t_flag[0])
@@ -287,7 +271,7 @@ for file_name in fits_filenames:
 			if MAG_MODE == True:
 				this_comp_mag = COMPS_MAG[i]
 				this_target_mag = this_comp_mag - 2.5 * math.log10(target_flux / comp_flux)
-				target_mag += this_target_mag / len(COMPS_RA)
+				target_mag += this_target_mag / max(len(COMPS_SKYCOORD), len(COMPS_PIX))
 			total_comp_flux += comp_flux
 			total_comp_err += comp_err
 			COMPS_PIX[i] = [comp_x, comp_y]
@@ -298,16 +282,17 @@ for file_name in fits_filenames:
 			total_target_err = 2.5 / math.log(10) * total_target_err
 
 		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 0.02:
-			plt.imshow(data_minus_bg, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
-			plt.colorbar()
+			fig = plt.figure(figsize=(8, 6))
+			ax = fig.add_subplot()
+			ax.set_title(f"Sample image of target star (blue) and comps (red)")
+			im1 = ax.imshow(fits_data, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
+			fig.colorbar(im1)
 			circ = Circle((target_x, target_y), kron_rad, color="b", fill=False)
-			ax = plt.gca()
 			ax.add_patch(circ)
 			for p in mat_patches:
 				ax.add_patch(p)
 			plt.show()
 			RANDOM_INSPECTION = False
-			plt.clf()
 
 		mid_photo_time = 0
 		if "MJD-OBS" in real_hdul.header:
@@ -350,12 +335,13 @@ for data_set in COMBINED_DATA:
 			data_file.write("{},{},{}\n".format(data_set[0], data_set[1], data_set[2]))
 
 the_s = "s" if len(COMPS_SKYCOORD) > 1 else ""
-
 ylabel = f"Flux ratio (target / comp{the_s})" if MAG_MODE == False else "Mangitude"
-plt.title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}")
-ax = plt.gca()
+
+fig = plt.figure(figsize=(9, 5))
+ax = fig.add_subplot()
+ax.set_title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}")
+ax.errorbar(MJD, FLUX_RATIO, yerr=FLUX_RATIO_ERR, linewidth=0, elinewidth=1.5, ecolor="#333", alpha=0.5)
 ax.scatter(MJD, FLUX_RATIO, marker="o", color="green", s=15)
-ax.errorbar(MJD, FLUX_RATIO, yerr=FLUX_RATIO_ERR, linewidth=0, elinewidth=1.5, ecolor="grey")
 ax.set_xlabel("Time (Days)")
 ax.set_ylabel(ylabel)
 
