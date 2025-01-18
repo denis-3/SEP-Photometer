@@ -48,9 +48,8 @@ COMPS_DEC = [""] # string array
 COMPS_MAGS = [0.] # float array
 COMPS_NAMES = [""] # string array
 
-# if no WCS, insert the initial x, y pixel values of the comp star(s) here, such as:
-# COMPS_PIX = [[x, y]]
-COMPS_PIX = [[-1, -1], [-1, -1], [-1, -1]] # array of [int, int]
+# if no WCS, insert the initial x, y pixel values of the comp star(s) here
+COMPS_PIX = [[-1, -1]] # array of [int, int]
 
 
 if USE_CLI_ARGS:
@@ -106,7 +105,10 @@ if USE_CLI_ARGS:
 
 # various sanity checks on inputs
 if TARGET_RA == "" and TARGET_DEC == "" and TARGET_PIX == [-1, -1]:
-	raise ValueError("Target star position has not been set")
+	raise ValueError("Target star position has not been set.")
+
+if STAR_NAME == "":
+	raise ValueError("Target name has not been set.")
 
 if len(COMPS_RA) != len(COMPS_DEC):
 	raise ValueError("The length of the comparison RA and Dec arrays are different.")
@@ -116,6 +118,9 @@ if COMPS_RA[0] == "" and COMPS_PIX[0] == [-1, -1]:
 
 if MAG_MODE == True and len(COMPS_MAGS) != len(COMPS_RA):
 	raise ValueError("The length of the comparison magnitude array is mismatched.")
+
+if FILTER == "":
+	raise ValueError("Filter name has not been set.")
 
 if EXPORT_WEBOBS == True and len(COMPS_NAMES) != len(COMPS_RA):
 	raise ValueError("The length of the comparison names array is mismatched.")
@@ -163,9 +168,9 @@ def sky_bg_from_annulus(data, cx, cy, r, dr):
 	annulus_pixels = []
 	for y in range(int(cy - (r + dr) - 1), int(cy + (r + dr) + 2)):
 		for x in range(int(cx - (r + dr) - 1), int(cx + (r + dr) + 2)):
-			if annulus_mask[y][x]:
+			if annulus_mask[y][x] == True:
 				annulus_pixels.append(data[y][x])
-	cutoff = np.percentile(annulus_pixels, 99)
+	cutoff = np.percentile(annulus_pixels, 95)
 	for i in range(len(annulus_pixels)-1, -1, -1):
 		if annulus_pixels[i] > cutoff:
 			del annulus_pixels[i]
@@ -206,45 +211,44 @@ for file_name in fits_filenames:
 		print("Opening file path", file_path)
 		use_wcs = True
 		this_wcs = WCS(real_hdul.header)
-		if this_wcs.wcs.ctype[0] != "":
-			target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
-		else:
-			use_wcs = False
-			target_x, target_y = TARGET_PIX
-		# fits_data = real_hdul.data.byteswap().newbyteorder() # numpy < 2.0.0
+		# numpy < 2.0.0
+		# fits_data = real_hdul.data.byteswap().newbyteorder()
 
 		# solution for numpy >= 2.0.0
 		fits_data = real_hdul.data.byteswap()
 		fits_data = fits_data.view(real_hdul.data.dtype.newbyteorder("<"))
+
 
 		if file_name.endswith(".fits.fz"):
 			fits_data = real_hdul.data
 		sep_bkg = sep.Background(fits_data)
 		sep_bkg_err = sep_bkg.globalrms
 
-		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 12, 8)
-		target_x, target_y, _ = sep.winpos(fits_data - loc_sky_bg, [target_x], [target_y], [3.33])
+		if this_wcs.wcs.ctype[0] != "":
+			target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
+		else:
+			use_wcs = False
+			target_x, target_y = TARGET_PIX
+
+		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 12, 5)
+		loc_fits_data = fits_data - loc_sky_bg
+		target_x, target_y, _ = sep.winpos(loc_fits_data, [target_x], [target_y], [3.33])
 		target_x = target_x[0]
 		target_y = target_y[0]
 
-		# optimize radius from flux_radius and kron_radius
-		init_rad = sep.flux_radius(fits_data - loc_sky_bg, [target_x], [target_y], [12], 0.66)[0][0]
-		kron_rad, kr_flag = sep.kron_radius(data=fits_data, x=[target_x], y=[target_y], a=[2*init_rad], b=[2*init_rad], theta=[0], r=[6])
+		# automatic radius - captures most of the flux of the star
+		auto_rad = sep.flux_radius(loc_fits_data, [target_x], [target_y], [12], 0.9)[0][0]
+		target_flux, target_err, t_flag = sep.sum_circle(loc_fits_data, [target_x], [target_y], [auto_rad],
+			err=sep_bkg_err, subpix=10)
 
-		if kr_flag[0] != 0:
-			print("\nSEP raised a non-zero flag for target star kron radius: ", kr_flag[0])
-			exit(kr_flag[0])
-		# kron_rad = kron_rad[0] * 1.3
-
-		target_flux, target_err, t_flag = sep.sum_circle(fits_data, [target_x], [target_y], [kron_rad],
-			err=sep_bkg_err, bkgann=(kron_rad+4, kron_rad+12))
 		if t_flag[0] != 0:
-			print("\nSEP raised a non-zero flag for target star photometry:", t_flag[0])
-			exit(t_flag[0])
-		target_flux = target_flux[0][0]
-		target_err = target_err[0][0]
+			raise ValueError("\nSEP raised a non-zero flag for target star photometry:", t_flag[0])
+
+		target_flux = target_flux[0]
+		target_err = target_err[0]
+
 		if VERBOSE == True:
-			print("Target X Y coords and radius", target_x, target_y, kron_rad)
+			print("Target X Y coords and radius", target_x, target_y, auto_rad)
 
 		target_brightness = 0 # target brightness
 		target_uncrt = 0 # target uncertainty
@@ -255,27 +259,25 @@ for file_name in fits_filenames:
 				comp_x, comp_y = this_wcs.world_to_pixel(comp_coord)
 			else:
 				comp_x, comp_y = COMPS_PIX[i]
-			loc_sky_bg = sky_bg_from_annulus(fits_data, comp_x, comp_y, 12, 8)
-			comp_x, comp_y, _ = sep.winpos(fits_data - loc_sky_bg, [comp_x], [comp_y], [3.33])
+
+			loc_sky_bg = sky_bg_from_annulus(fits_data, comp_x, comp_y, 12, 5)
+			loc_fits_data = fits_data - loc_sky_bg
+			comp_x, comp_y, _ = sep.winpos(loc_fits_data, [comp_x], [comp_y], [3.33])
 			comp_x = comp_x[0]
 			comp_y = comp_y[0]
 
-			init_rad = sep.flux_radius(fits_data, [comp_x], [comp_y], [12], 0.66)[0][0]
-			comp_krad, ckr_flag = sep.kron_radius(fits_data, [comp_x], [comp_y], [2*init_rad], [2*init_rad], [0], [6])
+			comp_arad = sep.flux_radius(loc_fits_data, [comp_x], [comp_y], [12], 0.9)[0][0]
+			comp_flux, comp_err, c_flag = sep.sum_circle(loc_fits_data, [comp_x], [comp_y], [auto_rad],
+				err=sep_bkg_err, subpix=10)
 
-			if ckr_flag[0] != 0:
-				raise ValueError(f"\nSEP raised a non-zero flag for comp star {i+1} kron radius: ", ckr_flag[0])
-			# comp_krad = comp_krad[0] * 1.3
-
-			comp_flux, comp_err, c_flag = sep.sum_circle(fits_data, [comp_x], [comp_y], [comp_krad],
-				err=sep_bkg_err, bkgann=(comp_krad+4, comp_krad+12))
 			if c_flag[0] !=0:
 				raise ValueError(f"\nSEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
-			comp_flux = comp_flux[0][0]
-			comp_err = comp_err[0][0]
+
+			comp_flux = comp_flux[0]
+			comp_err = comp_err[0]
 
 			if VERBOSE == True:
-				print("Comp X Y coords and radius", comp_x, comp_y, comp_krad)
+				print("Comp X Y coords and radius", comp_x, comp_y, comp_arad)
 
 			# calculate instrumental mags for webobs export
 			if EXPORT_WEBOBS == True:
@@ -289,25 +291,23 @@ for file_name in fits_filenames:
 			tc_min_ratio = (target_flux - target_err) / (comp_flux + comp_err)
 			tc_max_ratio = (target_flux + target_err) / (comp_flux - comp_err)
 
-			if MAG_MODE == True:
-				this_comp_mag = COMPS_MAGS[i]
-				this_target_mag = this_comp_mag - 2.5 * math.log10(tc_ratio)
-				min_target_mag = this_comp_mag - 2.5 * math.log10(tc_max_ratio)
-				max_target_mag = this_comp_mag - 2.5 * math.log10(tc_min_ratio)
-				target_mag_uncrt = max(max_target_mag - this_target_mag, this_target_mag - min_target_mag)
+			# calculate instrumental magnitudes first
+			this_target_mag = - 2.5 * math.log10(tc_ratio)
+			min_target_mag = - 2.5 * math.log10(tc_max_ratio)
+			max_target_mag = - 2.5 * math.log10(tc_min_ratio)
+			target_mag_uncrt = max(max_target_mag - this_target_mag, this_target_mag - min_target_mag)
 
-				target_brightness += this_target_mag / comp_qtty
-				target_uncrt += target_mag_uncrt ** 2 # uncertainty is summed in quadrature
-			else:
-				tc_ratio_uncrt = max(tc_max_ratio - tc_ratio, tc_ratio - tc_min_ratio)
-				target_brightness += tc_ratio / comp_qtty
-				target_uncrt += tc_ratio_uncrt **2 # uncertainty is summed in quadrature
+			if MAG_MODE == True:
+				this_target_mag += COMPS_MAGS[i]
+
+			target_brightness += this_target_mag / comp_qtty
+			target_uncrt += target_mag_uncrt ** 2 # uncertainty is summed in quadrature
 
 			COMPS_PIX[i] = [comp_x, comp_y]
 
 			# finally set up a patch for the comp star
 			if RANDOM_INSPECTION == True:
-				circ2 = Circle((comp_x, comp_y), comp_krad, color="r", fill=False)
+				circ2 = Circle((comp_x, comp_y), comp_arad, color="r", fill=False)
 				mat_patches.append(circ2)
 		target_uncrt = math.sqrt(target_uncrt)
 
@@ -315,9 +315,9 @@ for file_name in fits_filenames:
 			fig = plt.figure(figsize=(8, 6))
 			ax = fig.add_subplot()
 			ax.set_title(f"Sample image of target star (blue) and comps (red)")
-			im1 = ax.imshow(fits_data, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
+			im1 = ax.imshow(loc_fits_data, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
 			fig.colorbar(im1)
-			circ = Circle((target_x, target_y), kron_rad, color="b", fill=False)
+			circ = Circle((target_x, target_y), auto_rad, color="b", fill=False)
 			ax.add_patch(circ)
 			for p in mat_patches:
 				ax.add_patch(p)
@@ -367,7 +367,7 @@ COMBINED_DATA = sorted(COMBINED_DATA, key=(lambda x: x[0]))
 # initial webobs file setup
 if EXPORT_WEBOBS == True:
 	with open(EXPORT_PATH, "a") as data_file:
-		file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 14, 2025)\n"
+		file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 17, 2025)\n"
 		file_string += "#DELIM=,\n#DATE=JD\n#OBSTYPE=CCD\n"
 		if other_star_qtty == 3:
 			file_string += f"#The comparison stars used are {COMPS_NAMES[1]} and {COMPS_NAMES[2]}\n"
@@ -409,26 +409,26 @@ for data_set in COMBINED_DATA:
 				current_line += f",ENSEMBLE,na,{COMPS_NAMES[0]},{data_set[5][0]}"
 			current_line += f",{data_set[3]},na,{AAVSO_CHART}," # airmass, group, AAVSO chart ID
 			# add notes now
-			current_line += f"VMAGINS={data_set[4]}"
+			current_line += f"VMAGINS={"%.3f" % data_set[4]}"
 			if other_star_qtty == 2:
-				current_line += f"|CREFMAG={COMPS_MAGS[1]}|KREFMAG={COMPS_MAGS[0]}"
+				current_line += f"|CREFMAG={"%.3f" % COMPS_MAGS[1]}|KREFMAG={"%.3f" % COMPS_MAGS[0]}"
 			else:
-				current_line += f"|KREFMAG={COMPS_MAGS[0]}"
+				current_line += f"|KREFMAG={"%.3f" % COMPS_MAGS[0]}"
 
 			data_file.write(current_line)
 
 
-
-the_s = "s" if len(COMPS_SKYCOORD) > 1 else ""
-ylabel = f"Flux ratio (target / comparison{the_s})" if MAG_MODE == False else "Mangitude"
+ylabel = "Instrumental Magnitude" if MAG_MODE == False else "Calibrated Magnitude"
 
 fig = plt.figure(figsize=(9, 5))
 ax = fig.add_subplot()
 ax.set_title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}")
-ax.errorbar(MJD, BRIGHTNESS, yerr=BRIGHTNESS_UNCRT, linewidth=0, elinewidth=1.5, ecolor="#333")
+ax.plot(MJD, BRIGHTNESS, color="green", linewidth=1.5, alpha=0.25)
 ax.scatter(MJD, BRIGHTNESS, marker="o", color="green", s=15)
+ax.errorbar(MJD, BRIGHTNESS, yerr=BRIGHTNESS_UNCRT, linewidth=0, elinewidth=1.5, ecolor="#333")
 ax.set_xlabel("Time (Days)")
 ax.set_ylabel(ylabel)
+ax.invert_yaxis()
 
 END_TIME = time.time()
 TOTAL_TIME = "%.2f" % (END_TIME - START_TIME)

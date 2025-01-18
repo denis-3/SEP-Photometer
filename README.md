@@ -31,6 +31,6 @@ The program can be used with the following command line options. An asterisk **\
 
 Enclose any option values with spaces around quotes `""`, like so: `--tname "Beta Cephei"`.
 
-Here is an example command: `python photo-sep.py --path "./path/to/data/" --filter V --tname "WASP-164b" --tra "22 59 29.67" --tdec "-60 28 48.72" --cra "22 59 48.334" --cdec "-60 30 59.52" -v -e`
+Here is an example command: `python photo-sep.py --path "./path/to/data/" --filter V --tname "WASP-164" --tra "22 59 29.67" --tdec "-60 28 48.72" --cra "22 59 48.334" --cdec "-60 30 59.52" -v -e --aavso-filter V --aavso-code ABCDEF`
 
 After the program finishes analyzing the images, it will also display a graph showing the data.
