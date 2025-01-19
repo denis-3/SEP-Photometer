@@ -21,11 +21,11 @@ USE_CLI_ARGS = True
 # other general config
 FILE_FOLDER_PATH = "../science-data/"
 STAR_NAME = ""
-FILTER = ""
-MAG_MODE = False # whether or not to convert flux rations to standardized magnitude
+FILTER = "" # filter name as it appears in the FITS headers
+MAG_MODE = False # whether or not to use calibrated magnitude instead of instrumental magnitude
 RANDOM_INSPECTION = False # randomly inspects a file so you can manually check the apertures
 VERBOSE = False # extra logging info in console
-EXPORT_WEBOBS = False # whether or not to export photometry to csv
+EXPORT_WEBOBS = False # whether or not to export photometry to WebObs format
 EXPORT_PATH = f"./{STAR_NAME.lower().replace(" ", "-")}-{FILTER.lower()}.txt"
 AAVSO_OBSCODE = "" # observer code, only used in making the WebObs file
 AAVSO_FILTER = "" # name of the filter according to the AAVSO abbreviation
@@ -116,13 +116,13 @@ if len(COMPS_RA) != len(COMPS_DEC):
 if COMPS_RA[0] == "" and COMPS_PIX[0] == [-1, -1]:
 	raise ValueError("Both the comparison celestial and pixel coordinates were not input.")
 
-if MAG_MODE == True and len(COMPS_MAGS) != len(COMPS_RA):
+if MAG_MODE == True and len(COMPS_MAGS) != len(COMPS_RA) and len(COMPS_MAGS) != len(COMPS_PIX):
 	raise ValueError("The length of the comparison magnitude array is mismatched.")
 
 if FILTER == "":
 	raise ValueError("Filter name has not been set.")
 
-if EXPORT_WEBOBS == True and len(COMPS_NAMES) != len(COMPS_RA):
+if EXPORT_WEBOBS == True and len(COMPS_NAMES) != len(COMPS_RA) and len(COMPS_NAMES) != len(COMPS_PIX):
 	raise ValueError("The length of the comparison names array is mismatched.")
 
 if EXPORT_WEBOBS == True:
@@ -177,10 +177,14 @@ def sky_bg_from_annulus(data, cx, cy, r, dr):
 	return np.mean(annulus_pixels)
 
 
-TARGET_SKYCOORD = SkyCoord(ra=TARGET_RA, dec=TARGET_DEC, unit=(u.hourangle, u.deg))
+TARGET_SKYCOORD = None
+if TARGET_RA != "":
+	TARGET_SKYCOORD = SkyCoord(ra=TARGET_RA, dec=TARGET_DEC, unit=(u.hourangle, u.deg))
+
 COMPS_SKYCOORD = []
 for i in range(len(COMPS_RA)):
-	COMPS_SKYCOORD.append(SkyCoord(ra=COMPS_RA[i], dec=COMPS_DEC[i], unit=(u.hourangle, u.deg)))
+	if COMPS_RA[i] != "":
+		COMPS_SKYCOORD.append(SkyCoord(ra=COMPS_RA[i], dec=COMPS_DEC[i], unit=(u.hourangle, u.deg)))
 
 # arrays for exporting later, about target star
 MJD = []
@@ -191,6 +195,7 @@ fits_filenames = []
 for (_, _, filenames) in walk(FILE_FOLDER_PATH):
     fits_filenames.extend(filenames)
     break
+fits_filenames = sorted(fits_filenames)
 
 START_TIME = time.time()
 TARGET_INST_MAG = [] # target star instrumental mag
@@ -199,6 +204,11 @@ AIRMASS = []
 
 other_star_qtty = max(len(COMPS_SKYCOORD), len(COMPS_PIX)) # comp star plus check star (if present)
 comp_qtty = other_star_qtty - 1 if other_star_qtty > 1 and EXPORT_WEBOBS == True else other_star_qtty
+
+# add placeholder pixel values to prevent out of bounds access error later
+if len(COMPS_PIX) < len(COMPS_SKYCOORD):
+	for i in range(0, len(COMPS_PIX) - len(COMPS_SKYCOORD)):
+		COMPS_PIX.push([-1, -1])
 
 for file_name in fits_filenames:
 	file_path = FILE_FOLDER_PATH + file_name
@@ -211,6 +221,7 @@ for file_name in fits_filenames:
 		print("Opening file path", file_path)
 		use_wcs = True
 		this_wcs = WCS(real_hdul.header)
+
 		# numpy < 2.0.0
 		# fits_data = real_hdul.data.byteswap().newbyteorder()
 
@@ -262,12 +273,13 @@ for file_name in fits_filenames:
 
 			loc_sky_bg = sky_bg_from_annulus(fits_data, comp_x, comp_y, 12, 5)
 			loc_fits_data = fits_data - loc_sky_bg
-			comp_x, comp_y, _ = sep.winpos(loc_fits_data, [comp_x], [comp_y], [3.33])
+			comp_x, comp_y, cpos_flag = sep.winpos(loc_fits_data, [comp_x], [comp_y], [3])
 			comp_x = comp_x[0]
 			comp_y = comp_y[0]
+			COMPS_PIX[i] = [comp_x, comp_y]
 
 			comp_arad = sep.flux_radius(loc_fits_data, [comp_x], [comp_y], [12], 0.9)[0][0]
-			comp_flux, comp_err, c_flag = sep.sum_circle(loc_fits_data, [comp_x], [comp_y], [auto_rad],
+			comp_flux, comp_err, c_flag = sep.sum_circle(loc_fits_data, [comp_x], [comp_y], [comp_arad],
 				err=sep_bkg_err, subpix=10)
 
 			if c_flag[0] !=0:
@@ -302,8 +314,6 @@ for file_name in fits_filenames:
 
 			target_brightness += this_target_mag / comp_qtty
 			target_uncrt += target_mag_uncrt ** 2 # uncertainty is summed in quadrature
-
-			COMPS_PIX[i] = [comp_x, comp_y]
 
 			# finally set up a patch for the comp star
 			if RANDOM_INSPECTION == True:
@@ -367,7 +377,7 @@ COMBINED_DATA = sorted(COMBINED_DATA, key=(lambda x: x[0]))
 # initial webobs file setup
 if EXPORT_WEBOBS == True:
 	with open(EXPORT_PATH, "a") as data_file:
-		file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 17, 2025)\n"
+		file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 18, 2025)\n"
 		file_string += "#DELIM=,\n#DATE=JD\n#OBSTYPE=CCD\n"
 		if other_star_qtty == 3:
 			file_string += f"#The comparison stars used are {COMPS_NAMES[1]} and {COMPS_NAMES[2]}\n"
