@@ -213,7 +213,7 @@ if len(COMPS_PIX) < len(COMPS_SKYCOORD):
 for file_name in fits_filenames:
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
-		real_hdul = hdul[0] #hdul[1] if file_name.endswith(".fits.fz") else hdul[0]
+		real_hdul = hdul[0]
 		if not "filter" in real_hdul.header:
 			continue
 		if real_hdul.header["filter"].strip() != FILTER or "-e00." in file_name:
@@ -379,7 +379,7 @@ if EXPORT_WEBOBS == True:
 		if other_star_qtty == 3:
 			file_string += f"#The comparison stars used are {COMPS_NAMES[1]} and {COMPS_NAMES[2]}\n"
 		elif other_star_qtty > 3:
-			file_string += f"#The comparison stars used are {", ".join(COMPS_NAMES[1:-1])}, and {COMPS_NAMES[2]}\n"
+			file_string += "#The comparison stars used are " + ", ".join(COMPS_NAMES[1:-1]) + ", and " + COMPS_NAMES[len(COMPS_NAMES)-1] + "\n"
 
 		file_string += "#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES"
 		data_file.write(file_string)
