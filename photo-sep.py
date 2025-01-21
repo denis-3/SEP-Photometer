@@ -207,13 +207,13 @@ comp_qtty = other_star_qtty - 1 if other_star_qtty > 1 and EXPORT_WEBOBS == True
 
 # add placeholder pixel values to prevent out of bounds access error later
 if len(COMPS_PIX) < len(COMPS_SKYCOORD):
-	for i in range(0, len(COMPS_PIX) - len(COMPS_SKYCOORD)):
-		COMPS_PIX.push([-1, -1])
+	for i in range(0, len(COMPS_SKYCOORD)- len(COMPS_PIX)):
+		COMPS_PIX.append([-1, -1])
 
 for file_name in fits_filenames:
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
-		real_hdul = hdul[1] if file_name.endswith(".fits.fz") else hdul[0]
+		real_hdul = hdul[0] #hdul[1] if file_name.endswith(".fits.fz") else hdul[0]
 		if not "filter" in real_hdul.header:
 			continue
 		if real_hdul.header["filter"].strip() != FILTER or "-e00." in file_name:
@@ -227,11 +227,8 @@ for file_name in fits_filenames:
 
 		# solution for numpy >= 2.0.0
 		fits_data = real_hdul.data.byteswap()
-		fits_data = fits_data.view(real_hdul.data.dtype.newbyteorder("<"))
+		fits_data = fits_data.view(fits_data.dtype.newbyteorder("<"))
 
-
-		if file_name.endswith(".fits.fz"):
-			fits_data = real_hdul.data
 		sep_bkg = sep.Background(fits_data)
 		sep_bkg_err = sep_bkg.globalrms
 
@@ -419,11 +416,11 @@ for data_set in COMBINED_DATA:
 				current_line += f",ENSEMBLE,na,{COMPS_NAMES[0]},{data_set[5][0]}"
 			current_line += f",{data_set[3]},na,{AAVSO_CHART}," # airmass, group, AAVSO chart ID
 			# add notes now
-			current_line += f"VMAGINS={"%.3f" % data_set[4]}"
+			current_line += "VMAGINS=" + "%.3f" % data_set[4]
 			if other_star_qtty == 2:
-				current_line += f"|CREFMAG={"%.3f" % COMPS_MAGS[1]}|KREFMAG={"%.3f" % COMPS_MAGS[0]}"
+				current_line += "|CREFMAG=" + "%.3f" % COMPS_MAGS[1] + "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
 			else:
-				current_line += f"|KREFMAG={"%.3f" % COMPS_MAGS[0]}"
+				current_line += "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
 
 			data_file.write(current_line)
 
