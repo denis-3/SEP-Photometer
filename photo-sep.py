@@ -25,8 +25,8 @@ FILTER = "" # filter name as it appears in the FITS headers
 MAG_MODE = False # whether or not to use calibrated magnitude instead of instrumental magnitude
 RANDOM_INSPECTION = False # randomly inspects a file so you can manually check the apertures
 VERBOSE = False # extra logging info in console
-EXPORT_WEBOBS = False # whether or not to export photometry to WebObs format
-EXPORT_PATH = f"./{STAR_NAME.lower().replace(" ", "-")}-{FILTER.lower()}.txt"
+EXPORT_FILE = False # the options are: False, "WebObs", or "CSV"
+EXPORT_PATH = f"./{STAR_NAME.lower().replace(" ", "-")}-{FILTER.lower()}." + ("csv" if EXPORT_FILE == "CSV" else "txt")
 AAVSO_OBSCODE = "" # observer code, only used in making the WebObs file
 AAVSO_FILTER = "" # name of the filter according to the AAVSO abbreviation
 AAVSO_CHART = "na" # not applicable by default
@@ -51,13 +51,12 @@ COMPS_NAMES = [""] # string array
 # if no WCS, insert the initial x, y pixel values of the comp star(s) here
 COMPS_PIX = [[-1, -1]] # array of [int, int]
 
-
 if USE_CLI_ARGS:
 	TARGET_RA, TARGET_DEC = "", ""
 	TARGET_PIX = [-1, -1]
 	COMPS_RA, COMPS_DEC = [""], [""]
 	COMPS_PIX = [[-1, -1]]
-	VERBOSE, MAG_MODE, RANDOM_INSPECTION, EXPORT_WEBOBS = (False,)*4
+	VERBOSE, MAG_MODE, RANDOM_INSPECTION, EXPORT_FILE = (False,)*4
 	i = 1
 	while i < len(sys.argv):
 		req_var_set -= 1
@@ -91,8 +90,9 @@ if USE_CLI_ARGS:
 			COMPS_MAGS = map(float, sys.argv[i+1].split(","))
 		elif t_f == "-v": # verbose
 			VERBOSE = True
-		elif t_f == "-e": # export data to CSV
-			EXPORT_WEBOBS = True
+			i -= 1
+		elif t_f == "-e": # export data
+			EXPORT_FILE = sys.argv[i+1]
 		elif t_f == "--aavso-code": # AAVSO observer code
 			AAVOS_OBSCODE = sys.argv[i+1]
 		elif t_f == "--aavso-filter-name": # name of the filter, as to report in the AAVSO webobs
@@ -122,10 +122,13 @@ if MAG_MODE == True and len(COMPS_MAGS) != len(COMPS_RA) and len(COMPS_MAGS) != 
 if FILTER == "":
 	raise ValueError("Filter name has not been set.")
 
-if EXPORT_WEBOBS == True and len(COMPS_NAMES) != len(COMPS_RA) and len(COMPS_NAMES) != len(COMPS_PIX):
+if EXPORT_FILE != False and EXPORT_FILE != "WebObs" and EXPORT_FILE != "CSV":
+	raise ValueError("Unknown file export option:", EXPORT_FILE)
+
+if EXPORT_FILE != False and len(COMPS_NAMES) != len(COMPS_RA) and len(COMPS_NAMES) != len(COMPS_PIX):
 	raise ValueError("The length of the comparison names array is mismatched.")
 
-if EXPORT_WEBOBS == True:
+if EXPORT_FILE == "WebObs":
 	if AAVSO_OBSCODE == "":
 		raise ValueError("No AAVSO Observer Code has been input, while the 'export to WebObs' option is on")
 
@@ -149,8 +152,8 @@ print("Inspection:", RANDOM_INSPECTION)
 print("Magnitude mode:", MAG_MODE)
 if MAG_MODE == True:
 	print("Comp star(s) Magnitudes", COMPS_MAGS)
-print("Export to WebObs Extended File Format:", EXPORT_WEBOBS)
-if EXPORT_WEBOBS == True:
+print("Export photometry data to file:", EXPORT_FILE)
+if EXPORT_FILE == "WebObs":
 	print("WebObs export path:", EXPORT_PATH)
 	print("AAVSO Observer Code:", AAVSO_OBSCODE)
 	print("AAVSO filter identifier:", AAVSO_FILTER)
@@ -168,7 +171,7 @@ def sky_bg_from_annulus(data, cx, cy, r, dr):
 	annulus_pixels = []
 	for y in range(int(cy - (r + dr) - 1), int(cy + (r + dr) + 2)):
 		for x in range(int(cx - (r + dr) - 1), int(cx + (r + dr) + 2)):
-			if annulus_mask[y][x] == True:
+			if annulus_mask[y][x] == True and not math.isnan(data[y][x]):
 				annulus_pixels.append(data[y][x])
 	cutoff = np.percentile(annulus_pixels, 95)
 	for i in range(len(annulus_pixels)-1, -1, -1):
@@ -190,7 +193,6 @@ for i in range(len(COMPS_RA)):
 MJD = []
 BRIGHTNESS = []
 BRIGHTNESS_UNCRT = []
-
 fits_filenames = []
 for (_, _, filenames) in walk(FILE_FOLDER_PATH):
     fits_filenames.extend(filenames)
@@ -203,7 +205,7 @@ COMPS_INST_MAG = [] # first (and second) comparison star instrumental mag
 AIRMASS = []
 
 other_star_qtty = max(len(COMPS_SKYCOORD), len(COMPS_PIX)) # comp star plus check star (if present)
-comp_qtty = other_star_qtty - 1 if other_star_qtty > 1 and EXPORT_WEBOBS == True else other_star_qtty
+comp_qtty = other_star_qtty - 1 if other_star_qtty > 1 and EXPORT_FILE == "WebObs" else other_star_qtty
 
 # add placeholder pixel values to prevent out of bounds access error later
 if len(COMPS_PIX) < len(COMPS_SKYCOORD):
@@ -213,21 +215,27 @@ if len(COMPS_PIX) < len(COMPS_SKYCOORD):
 for file_name in fits_filenames:
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
-		real_hdul = hdul[0]
+		# handle compressed FITS files
+		real_hdul = hdul[0] if hdul[0].header["naxis"] != 0 else hdul[1]
+
 		if not "filter" in real_hdul.header:
 			continue
 		if real_hdul.header["filter"].strip() != FILTER or "-e00." in file_name:
 			continue
 		print("Opening file path", file_path)
+
 		use_wcs = True
 		this_wcs = WCS(real_hdul.header)
 
-		# numpy < 2.0.0
-		# fits_data = real_hdul.data.byteswap().newbyteorder()
+		# switch to little endian byte order
+		fits_data = real_hdul.data
+		if real_hdul.data.dtype.byteorder == ">":
+			# numpy < 2.0.0
+			# fits_data = real_hdul.data.byteswap().newbyteorder()
 
-		# solution for numpy >= 2.0.0
-		fits_data = real_hdul.data.byteswap()
-		fits_data = fits_data.view(fits_data.dtype.newbyteorder("<"))
+			# solution for numpy >= 2.0.0
+			fits_data = real_hdul.data.byteswap()
+			fits_data = fits_data.view(fits_data.dtype.newbyteorder("<"))
 
 		sep_bkg = sep.Background(fits_data)
 		sep_bkg_err = sep_bkg.globalrms
@@ -239,6 +247,8 @@ for file_name in fits_filenames:
 			target_x, target_y = TARGET_PIX
 
 		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 12, 5)
+		if VERBOSE == True:
+			print("Target star\nLocal sky background", loc_sky_bg)
 		loc_fits_data = fits_data - loc_sky_bg
 		target_x, target_y, _ = sep.winpos(loc_fits_data, [target_x], [target_y], [3.33])
 		target_x = target_x[0]
@@ -246,17 +256,16 @@ for file_name in fits_filenames:
 
 		# automatic radius - captures most of the flux of the star
 		auto_rad = sep.flux_radius(loc_fits_data, [target_x], [target_y], [12], 0.9)[0][0]
+		if VERBOSE == True:
+			print("X=", target_x, ", Y=", target_y, ", R=", auto_rad)
 		target_flux, target_err, t_flag = sep.sum_circle(loc_fits_data, [target_x], [target_y], [auto_rad],
 			err=sep_bkg_err, subpix=10)
 
 		if t_flag[0] != 0:
-			raise ValueError("\nSEP raised a non-zero flag for target star photometry:", t_flag[0])
+			raise ValueError("SEP raised a non-zero flag for target star photometry:", t_flag[0])
 
 		target_flux = target_flux[0]
 		target_err = target_err[0]
-
-		if VERBOSE == True:
-			print("Target X Y coords and radius", target_x, target_y, auto_rad)
 
 		target_brightness = 0 # target brightness
 		target_uncrt = 0 # target uncertainty
@@ -269,6 +278,9 @@ for file_name in fits_filenames:
 				comp_x, comp_y = COMPS_PIX[i]
 
 			loc_sky_bg = sky_bg_from_annulus(fits_data, comp_x, comp_y, 12, 5)
+			if VERBOSE == True:
+				print("Comparison star", i+1)
+				print("Local sky background:", loc_sky_bg)
 			loc_fits_data = fits_data - loc_sky_bg
 			comp_x, comp_y, cpos_flag = sep.winpos(loc_fits_data, [comp_x], [comp_y], [3])
 			comp_x = comp_x[0]
@@ -280,16 +292,16 @@ for file_name in fits_filenames:
 				err=sep_bkg_err, subpix=10)
 
 			if c_flag[0] !=0:
-				raise ValueError(f"\nSEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
+				raise ValueError(f"SEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
 
 			comp_flux = comp_flux[0]
 			comp_err = comp_err[0]
 
 			if VERBOSE == True:
-				print("Comp X Y coords and radius", comp_x, comp_y, comp_arad)
+				print("X=", comp_x, ", Y=", comp_y, ", R=", comp_arad)
 
 			# calculate instrumental mags for webobs export
-			if EXPORT_WEBOBS == True:
+			if EXPORT_FILE == "WebObs":
 				if i == 0:
 					COMPS_INST_MAG.append([-2.5 * math.log10(comp_flux)])
 					continue # check star is not inlcuded in comp ensemble
@@ -359,7 +371,7 @@ for i in range(len(MJD)):
 	COMBINED_DATA.append([MJD[i] - MIN_MJD,
 		BRIGHTNESS[i],
 		BRIGHTNESS_UNCRT[i]])
-	if EXPORT_WEBOBS == True:
+	if EXPORT_FILE == "WebObs":
 		idx = len(COMBINED_DATA)-1
 		COMBINED_DATA[idx].append(AIRMASS[i])
 		COMBINED_DATA[idx].append(TARGET_INST_MAG[i])
@@ -372,56 +384,65 @@ BRIGHTNESS = []
 BRIGHTNESS_UNCRT = []
 COMBINED_DATA = sorted(COMBINED_DATA, key=(lambda x: x[0]))
 # initial webobs file setup
-if EXPORT_WEBOBS == True:
+if EXPORT_FILE != False:
 	with open(EXPORT_PATH, "a") as data_file:
-		file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 18, 2025)\n"
-		file_string += "#DELIM=,\n#DATE=JD\n#OBSTYPE=CCD\n"
-		if other_star_qtty == 3:
-			file_string += f"#The comparison stars used are {COMPS_NAMES[1]} and {COMPS_NAMES[2]}\n"
-		elif other_star_qtty > 3:
-			file_string += "#The comparison stars used are " + ", ".join(COMPS_NAMES[1:-1]) + ", and " + COMPS_NAMES[len(COMPS_NAMES)-1] + "\n"
+		file_string = ""
+		if EXPORT_FILE == "WebObs":
+			file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 18, 2025)\n"
+			file_string += "#DELIM=,\n#DATE=JD\n#OBSTYPE=CCD\n"
+			if other_star_qtty == 3:
+				file_string += f"#The comparison stars used are {COMPS_NAMES[1]} and {COMPS_NAMES[2]}\n"
+			elif other_star_qtty > 3:
+				file_string += "#The comparison stars used are " + ", ".join(COMPS_NAMES[1:-1]) + ", and " + COMPS_NAMES[len(COMPS_NAMES)-1] + "\n"
 
-		file_string += "#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES"
+			file_string += "#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES"
+		elif EXPORT_FILE == "CSV":
+			file_string = "MJD, " + ("Calibrated" if MAG_MODE == True else "Instrumental") + " Magnitude, Magnitude Unvertainty"
 		data_file.write(file_string)
+
+
 
 # process data and add it to webobs if necessary
 for data_set in COMBINED_DATA:
 	MJD.append(data_set[0])
 	BRIGHTNESS.append(data_set[1])
 	BRIGHTNESS_UNCRT.append(data_set[2])
-	if EXPORT_WEBOBS == True:
+	if EXPORT_FILE != False:
 		with open(EXPORT_PATH, "a") as data_file:
-			current_line = f"\n{STAR_NAME},{data_set[0] + MIN_MJD},"
-			mag_to_write = data_set[1]
-			mag_err_to_write = data_set[2]
-			# if standardized magnitudes are not available, we use differential magnitude
-			if MAG_MODE == False:
-				mag_to_write = -2.5 * math.log10(data_set[1])
-				mag_err_to_write = 2.5 / math.log(10) * data_set[2]
-			current_line += "%.3f" % mag_to_write
-			current_line += ","
-			current_line += "%.6f" % mag_err_to_write
-			current_line += f",{AAVSO_FILTER},NO,"
-			if MAG_MODE == True:
-				current_line += "STD"
-			else:
-				current_line += "DIFF"
+			current_line = ""
+			if EXPORT_FILE == "WebObs":
+				current_line = f"\n{STAR_NAME},{data_set[0] + MIN_MJD},"
+				mag_to_write = data_set[1]
+				mag_err_to_write = data_set[2]
+				# if standardized magnitudes are not available, we use differential magnitude
+				if MAG_MODE == False:
+					mag_to_write = -2.5 * math.log10(data_set[1])
+					mag_err_to_write = 2.5 / math.log(10) * data_set[2]
+				current_line += "%.3f" % mag_to_write
+				current_line += ","
+				current_line += "%.6f" % mag_err_to_write
+				current_line += f",{AAVSO_FILTER},NO,"
+				if MAG_MODE == True:
+					current_line += "STD"
+				else:
+					current_line += "DIFF"
 
-			# comps and check star listing
-			if len(COMPS_RA) == 1:
-				current_line += f",{COMPS_NAMES[0]},{data_set[5][0]},na,na"
-			elif len(COMPS_RA) == 2:
-				current_line += f",{COMPS_NAMES[1]},{data_set[5][1]},{COMPS_NAMES[0]},{data_set[5][0]}"
-			elif len(COMPS_RA) > 2:
-				current_line += f",ENSEMBLE,na,{COMPS_NAMES[0]},{data_set[5][0]}"
-			current_line += f",{data_set[3]},na,{AAVSO_CHART}," # airmass, group, AAVSO chart ID
-			# add notes now
-			current_line += "VMAGINS=" + "%.3f" % data_set[4]
-			if other_star_qtty == 2:
-				current_line += "|CREFMAG=" + "%.3f" % COMPS_MAGS[1] + "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
-			else:
-				current_line += "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
-
+				# comps and check star listing
+				if len(COMPS_RA) == 1:
+					current_line += f",{COMPS_NAMES[0]},{data_set[5][0]},na,na"
+				elif len(COMPS_RA) == 2:
+					current_line += f",{COMPS_NAMES[1]},{data_set[5][1]},{COMPS_NAMES[0]},{data_set[5][0]}"
+				elif len(COMPS_RA) > 2:
+					current_line += f",ENSEMBLE,na,{COMPS_NAMES[0]},{data_set[5][0]}"
+				current_line += f",{data_set[3]},na,{AAVSO_CHART}," # airmass, group, AAVSO chart ID
+				# add notes now
+				current_line += "VMAGINS=" + "%.3f" % data_set[4]
+				if other_star_qtty == 2:
+					current_line += "|CREFMAG=" + "%.3f" % COMPS_MAGS[1] + "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
+				else:
+					current_line += "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
+			elif EXPORT_FILE == "CSV":
+				current_line += f"\n{MIN_MJD + data_set[0]},{data_set[1]},{data_set[2]}"
 			data_file.write(current_line)
 
 
@@ -429,12 +450,12 @@ ylabel = "Instrumental Magnitude" if MAG_MODE == False else "Calibrated Magnitud
 
 fig = plt.figure(figsize=(9, 5))
 ax = fig.add_subplot()
-ax.set_title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}")
+ax.set_title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}", fontsize=16)
 ax.plot(MJD, BRIGHTNESS, color="green", linewidth=1.5, alpha=0.25)
 ax.scatter(MJD, BRIGHTNESS, marker="o", color="green", s=15)
 ax.errorbar(MJD, BRIGHTNESS, yerr=BRIGHTNESS_UNCRT, linewidth=0, elinewidth=1.5, ecolor="#333")
-ax.set_xlabel("Time (Days)")
-ax.set_ylabel(ylabel)
+ax.set_xlabel(f"Time since {MIN_MJD} MJD (Days)", fontsize=13)
+ax.set_ylabel(ylabel, fontsize=13)
 ax.invert_yaxis()
 
 END_TIME = time.time()
