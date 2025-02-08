@@ -4,7 +4,7 @@ import sep_pjw as sep
 from astropy.io import fits
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation
 from astropy import units as u
 from astropy.wcs import WCS
 from astropy.time import Time
@@ -50,6 +50,15 @@ COMPS_NAMES = [""] # string array
 
 # if no WCS, insert the initial x, y pixel values of the comp star(s) here
 COMPS_PIX = [[-1, -1]] # array of [int, int]
+
+# Info of observing site to calculate HJD (lattitude, longitude, altitue)
+# If this is not set manually then the code will try to set it automatically from FITS headers
+# The "unset" value is -999
+SITE_INFO = {
+	"lat": -999,
+	"lon": -999,
+	"alt": -999
+	}
 
 if USE_CLI_ARGS:
 	TARGET_RA, TARGET_DEC = "", ""
@@ -213,6 +222,8 @@ if len(COMPS_PIX) < len(COMPS_SKYCOORD):
 		COMPS_PIX.append([-1, -1])
 
 for file_name in fits_filenames:
+	if not file_name.endswith((".fits", ".fits.fz")):
+		continue
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
 		# handle compressed FITS files
@@ -228,7 +239,7 @@ for file_name in fits_filenames:
 		this_wcs = WCS(real_hdul.header)
 
 		# switch to little endian byte order
-		fits_data = real_hdul.data
+		fits_data = real_hdul.data.astype(np.float32)
 		if real_hdul.data.dtype.byteorder == ">":
 			# numpy < 2.0.0
 			# fits_data = real_hdul.data.byteswap().newbyteorder()
@@ -270,6 +281,7 @@ for file_name in fits_filenames:
 		target_brightness = 0 # target brightness
 		target_uncrt = 0 # target uncertainty
 		mat_patches = [] # matplotlib patches
+		# for i in range(max(len(COMPS_SKYCOORD), len(COMPS_PIX))):
 		for i in range(max(len(COMPS_SKYCOORD), len(COMPS_PIX))):
 			if use_wcs:
 				comp_coord = COMPS_SKYCOORD[i]
@@ -344,12 +356,13 @@ for file_name in fits_filenames:
 			RANDOM_INSPECTION = False
 
 		mid_photo_time = 0
-		if "MJD-OBS" in real_hdul.header:
-			mid_photo_time = real_hdul.header["MJD-OBS"]
-		elif "DATE-AVG" in real_hdul.header:
+		if "DATE-AVG" in real_hdul.header:
 			mid_photo_time = Time(real_hdul.header["DATE-AVG"]).jd
+		elif "MJD-OBS" in real_hdul.header:
+			# mjd is converted to normal jd too
+			mid_photo_time = real_hdul.header["MJD-OBS"] + real_hdul.header["EXPTIME"] / 172800 + 2400000.5
 		elif "DATE-OBS" in real_hdul.header:
-			mid_photo_time = Time(real_hdul.header["DATE-OBS"]).jd
+			mid_photo_time = Time(real_hdul.header["DATE-OBS"]).jd + real_hdul.header["EXPTIME"] / 172800
 		else:
 			raise ValueError("No suitable date header found.")
 
@@ -357,6 +370,24 @@ for file_name in fits_filenames:
 			AIRMASS.append(str(real_hdul.header["airmass"]))
 		else:
 			AIRMASS.append("na")
+
+		if EXPORT_FILE == "CSV":
+			# different variations of the headers
+			if "LAT-OBS" in real_hdul.header and SITE_INFO["lat"] == -999:
+				SITE_INFO["lat"] = real_hdul.header["LAT-OBS"]
+			if "LONG-OBS" in real_hdul.header and SITE_INFO["lon"] == -999:
+				SITE_INFO["lon"] = real_hdul.header["LONG-OBS"]
+			if "ALT-OBS" in real_hdul.header and SITE_INFO["alt"] == -999:
+				SITE_INFO["alt"] = real_hdul.header["ALT-OBS"]
+
+			# another variation is "SITE"
+			if "SITELAT" in real_hdul.header and SITE_INFO["lat"] == -999:
+				SITE_INFO["lat"] = real_hdul.header["SITELAT"]
+			if "SITELONG" in real_hdul.header and SITE_INFO["lon"] == -999:
+				SITE_INFO["lon"] = real_hdul.header["LONG-OBS"]
+			if "SITEALT" in real_hdul.header and SITE_INFO["alt"] == -999:
+				SITE_INFO["alt"] = real_hdul.header["ALT-OBS"]
+
 		MJD.append(mid_photo_time)
 		BRIGHTNESS.append(target_brightness)
 		BRIGHTNESS_UNCRT.append(target_uncrt)
@@ -364,11 +395,14 @@ for file_name in fits_filenames:
 		TARGET_PIX = [target_x, target_y]
 		print()
 
+if EXPORT_FILE == "CSV":
+	print("Got this observervation site info:", SITE_INFO)
+
 # sort all the data points by MJD so it can be displayed easily
 COMBINED_DATA = []
-MIN_MJD = min(MJD)
+MIN_JD = min(MJD)
 for i in range(len(MJD)):
-	COMBINED_DATA.append([MJD[i] - MIN_MJD,
+	COMBINED_DATA.append([MJD[i] - MIN_JD,
 		BRIGHTNESS[i],
 		BRIGHTNESS_UNCRT[i]])
 	if EXPORT_FILE == "WebObs":
@@ -377,6 +411,7 @@ for i in range(len(MJD)):
 		COMBINED_DATA[idx].append(TARGET_INST_MAG[i])
 		COMBINED_DATA[idx].append(COMPS_INST_MAG[i])
 
+print("Exporting data to file...")
 
 # reset arrays for sorting by MJD
 MJD = []
@@ -397,9 +432,8 @@ if EXPORT_FILE != False:
 
 			file_string += "#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES"
 		elif EXPORT_FILE == "CSV":
-			file_string = "MJD, " + ("Calibrated" if MAG_MODE == True else "Instrumental") + " Magnitude, Magnitude Unvertainty"
+			file_string = "JD,HJD," + ("Calibrated" if MAG_MODE == True else "Instrumental") + " Magnitude,Magnitude Uncertainty"
 		data_file.write(file_string)
-
 
 
 # process data and add it to webobs if necessary
@@ -411,7 +445,7 @@ for data_set in COMBINED_DATA:
 		with open(EXPORT_PATH, "a") as data_file:
 			current_line = ""
 			if EXPORT_FILE == "WebObs":
-				current_line = f"\n{STAR_NAME},{data_set[0] + MIN_MJD},"
+				current_line = f"\n{STAR_NAME},{MIN_JD, data_set[0]},"
 				mag_to_write = data_set[1]
 				mag_err_to_write = data_set[2]
 				# if standardized magnitudes are not available, we use differential magnitude
@@ -442,9 +476,17 @@ for data_set in COMBINED_DATA:
 				else:
 					current_line += "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
 			elif EXPORT_FILE == "CSV":
-				current_line += f"\n{MIN_MJD + data_set[0]},{data_set[1]},{data_set[2]}"
+				# heliocentric correction
+				site_loc = EarthLocation.from_geodetic(lon=SITE_INFO["lon"], lat=SITE_INFO["lat"], height=SITE_INFO["alt"])
+				this_time = Time(MIN_JD + data_set[0], format="jd", scale="utc", location=site_loc)
+				htime_corr = this_time.light_travel_time(TARGET_SKYCOORD, "heliocentric")
+				print("time check,", MIN_JD + data_set[0], this_time)
+
+				# JD, HJD, brightness, brightness uncertainty
+				current_line += f"\n{this_time},{this_time + htime_corr},{data_set[1]},{data_set[2]}"
 			data_file.write(current_line)
 
+print("Displaying chart...")
 
 ylabel = "Instrumental Magnitude" if MAG_MODE == False else "Calibrated Magnitude"
 
@@ -454,7 +496,7 @@ ax.set_title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}", fontsize
 ax.plot(MJD, BRIGHTNESS, color="green", linewidth=1.5, alpha=0.25)
 ax.scatter(MJD, BRIGHTNESS, marker="o", color="green", s=15)
 ax.errorbar(MJD, BRIGHTNESS, yerr=BRIGHTNESS_UNCRT, linewidth=0, elinewidth=1.5, ecolor="#333")
-ax.set_xlabel(f"Time since {MIN_MJD} MJD (Days)", fontsize=13)
+ax.set_xlabel(f"Time since {MIN_JD} MJD (Days)", fontsize=13)
 ax.set_ylabel(ylabel, fontsize=13)
 ax.invert_yaxis()
 
