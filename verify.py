@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 # settings
-KNOWN_FILE_PATH = "../science-data/" # file path of past light data
+KNOWN_FILE_PATH = "./" # file path of past light data
 OBS_FILE_PATH = "./" # file path of the transit in question
 PERIOD = 1 # period, in days
 JD_COLUMN = [1, 1] # Julian date column of data in the first and second file (starting from 1)

@@ -3,7 +3,7 @@
 import sep_pjw as sep
 from astropy.io import fits
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+from matplotlib.patches import Ellipse
 from astropy.coordinates import SkyCoord, EarthLocation
 from astropy import units as u
 from astropy.wcs import WCS
@@ -11,6 +11,7 @@ from astropy.time import Time
 from os import walk
 import math
 import numpy as np
+import copy
 import random
 import sys
 import time
@@ -188,6 +189,24 @@ def sky_bg_from_annulus(data, cx, cy, r, dr):
 			del annulus_pixels[i]
 	return np.mean(annulus_pixels)
 
+# get square slice in 2d array
+def getSquareSlice(data, center_x, center_y, side_length):
+	data_shape = data.shape
+	slice_x = [int(center_x - side_length/2), int(center_x + side_length/2)]
+	slice_y = [int(center_y - side_length/2), int(center_y + side_length/2)]
+
+	for i in range(2):
+			if slice_x[i] >= data_shape[1]:
+				slice_x[i] = data_shape[1] - 1
+			elif slice_x[i] < 0:
+				slice_x[i] = 0
+
+			if slice_y[i] >= data_shape[0]:
+				slice_y[i] = data_shape[0] - 1
+			elif slice_y[i] < 0:
+				slice_y[i] = 0
+	sliced = data[slice_y[0] : slice_y[1], slice_x[0] : slice_x[1]]
+	return copy.deepcopy(sliced)
 
 TARGET_SKYCOORD = None
 if TARGET_RA != "":
@@ -249,7 +268,6 @@ for file_name in fits_filenames:
 			fits_data = fits_data.view(fits_data.dtype.newbyteorder("<"))
 
 		sep_bkg = sep.Background(fits_data)
-		sep_bkg_err = sep_bkg.globalrms
 
 		if this_wcs.wcs.ctype[0] != "":
 			target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
@@ -257,20 +275,41 @@ for file_name in fits_filenames:
 			use_wcs = False
 			target_x, target_y = TARGET_PIX
 
-		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 12, 5)
+		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 20, 5)
 		if VERBOSE == True:
 			print("Target star\nLocal sky background", loc_sky_bg)
 		loc_fits_data = fits_data - loc_sky_bg
+
 		target_x, target_y, _ = sep.winpos(loc_fits_data, [target_x], [target_y], [3.33])
 		target_x = target_x[0]
 		target_y = target_y[0]
-
-		# automatic radius - captures most of the flux of the star
-		auto_rad = sep.flux_radius(loc_fits_data, [target_x], [target_y], [12], 0.9)[0][0]
 		if VERBOSE == True:
-			print("X=", target_x, ", Y=", target_y, ", R=", auto_rad)
-		target_flux, target_err, t_flag = sep.sum_circle(loc_fits_data, [target_x], [target_y], [auto_rad],
-			err=sep_bkg_err, subpix=10)
+			print("Position: x=", target_x, ", y=", target_y)
+
+		loc_fits_data = getSquareSlice(loc_fits_data, target_x, target_y, 100)
+
+		sources = sep.extract(loc_fits_data, 2.25, err=sep_bkg.globalrms, minarea=15)
+
+		target_i = -1 # index of the target star
+		for i in range(len(sources["thresh"])):
+			dist = math.sqrt((sources["x"][i] - 50)**2 + (sources["y"][i] - 50)**2)
+			if dist < 2:
+				target_i = i
+				if sources["flag"][i] > 1:
+					raise ValueError("SEP raised unexpected flag for target: ", sources["flag"][i])
+				break
+		if target_i == -1:
+			raise ValueError("SEP could not detect target star above threshold!")
+		# scale a and b parameters
+		target_a = 2.5 * sources["a"][target_i]
+		target_b = 2.5 * sources["b"][target_i]
+		target_th = sources["theta"][target_i]
+
+		if VERBOSE == True:
+			print("Ellipse parameters: a=", target_a, ", b=", target_b, ", theta=", target_th)
+
+		target_flux, target_err, t_flag = sep.sum_ellipse(loc_fits_data, [sources["x"][target_i]], [sources["y"][target_i]],
+			[target_a], [target_b], [target_th], err=sep_bkg.globalrms, subpix=10)
 
 		if t_flag[0] != 0:
 			raise ValueError("SEP raised a non-zero flag for target star photometry:", t_flag[0])
@@ -278,10 +317,12 @@ for file_name in fits_filenames:
 		target_flux = target_flux[0]
 		target_err = target_err[0]
 
+		if VERBOSE == True:
+			print("Flux: ", target_flux, "+/-", target_err, "\n")
+
 		target_brightness = 0 # target brightness
 		target_uncrt = 0 # target uncertainty
 		mat_patches = [] # matplotlib patches
-		# for i in range(max(len(COMPS_SKYCOORD), len(COMPS_PIX))):
 		for i in range(max(len(COMPS_SKYCOORD), len(COMPS_PIX))):
 			if use_wcs:
 				comp_coord = COMPS_SKYCOORD[i]
@@ -298,19 +339,38 @@ for file_name in fits_filenames:
 			comp_x = comp_x[0]
 			comp_y = comp_y[0]
 			COMPS_PIX[i] = [comp_x, comp_y]
+			if VERBOSE == True:
+				print("Location: x=", comp_x, ", y=", comp_y)
 
-			comp_arad = sep.flux_radius(loc_fits_data, [comp_x], [comp_y], [12], 0.9)[0][0]
-			comp_flux, comp_err, c_flag = sep.sum_circle(loc_fits_data, [comp_x], [comp_y], [comp_arad],
-				err=sep_bkg_err, subpix=10)
+			loc_fits_data = getSquareSlice(loc_fits_data, comp_x, comp_y, 100)
 
+			sources = sep.extract(loc_fits_data, 2.25, err=sep_bkg.globalrms, minarea=15)
+
+			comp_i = -1 # index of the target star
+			for ii in range(len(sources["thresh"])):
+				dist = math.sqrt((sources["x"][ii] - 50)**2 + (sources["y"][ii] - 50)**2)
+				if dist < 2:
+					comp_i = ii
+					if sources["flag"][ii] > 1:
+						raise ValueError("SEP raised unexpected flag for target: ", sources["flag"][ii])
+					break
+			if comp_i == -1:
+				raise ValueError("SEP could not detect target star above threshold!")
+
+			# scale a and b parameters
+			comp_a = 2.5 * sources["a"][comp_i]
+			comp_b = 2.5 * sources["b"][comp_i]
+			if VERBOSE == True:
+				print("Ellipse parameters: a=", comp_x, ", b=", comp_y, ", theta=", sources["theta"][comp_i])
+
+			comp_flux, comp_err, c_flag = sep.sum_ellipse(loc_fits_data, [sources["x"][comp_i]], [sources["y"][comp_i]],
+				[comp_a], [comp_b], [sources["theta"][comp_i]], err=sep_bkg.globalrms, subpix=10)
 			if c_flag[0] !=0:
 				raise ValueError(f"SEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
-
 			comp_flux = comp_flux[0]
 			comp_err = comp_err[0]
-
 			if VERBOSE == True:
-				print("X=", comp_x, ", Y=", comp_y, ", R=", comp_arad)
+				print("Flux: ", comp_flux, "+/-", comp_err)
 
 			# calculate instrumental mags for webobs export
 			if EXPORT_FILE == "WebObs":
@@ -338,17 +398,19 @@ for file_name in fits_filenames:
 
 			# finally set up a patch for the comp star
 			if RANDOM_INSPECTION == True:
-				circ2 = Circle((comp_x, comp_y), comp_arad, color="r", fill=False)
+				circ2 = Ellipse(xy=(comp_x, comp_y), width=2*comp_a, height=2*comp_b,
+					angle=sources["theta"][comp_i]*180./3.1415, color="b", fill=False)
 				mat_patches.append(circ2)
 		target_uncrt = math.sqrt(target_uncrt)
 
 		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 0.02:
+			mean, stdev = np.mean(fits_data), np.std(fits_data)
 			fig = plt.figure(figsize=(8, 6))
 			ax = fig.add_subplot()
-			ax.set_title(f"Sample image of target star (blue) and comps (red)")
-			im1 = ax.imshow(loc_fits_data, interpolation="nearest", vmin=0.0, vmax=4000.0, cmap="gray", origin="lower")
+			ax.set_title("Sample image showing target (green) and comparison (blue) stars")
+			im1 = ax.imshow(fits_data, interpolation="nearest", vmin=mean-3*stdev, vmax=mean+3*stdev, cmap="gray", origin="lower")
 			fig.colorbar(im1)
-			circ = Circle((target_x, target_y), auto_rad, color="b", fill=False)
+			circ = Ellipse(xy=(target_x, target_y), width=2*target_a, height=2*target_b, angle=target_th*180./3.1415, color="g", fill=False)
 			ax.add_patch(circ)
 			for p in mat_patches:
 				ax.add_patch(p)
@@ -384,9 +446,11 @@ for file_name in fits_filenames:
 			if "SITELAT" in real_hdul.header and SITE_INFO["lat"] == -999:
 				SITE_INFO["lat"] = real_hdul.header["SITELAT"]
 			if "SITELONG" in real_hdul.header and SITE_INFO["lon"] == -999:
-				SITE_INFO["lon"] = real_hdul.header["LONG-OBS"]
+				SITE_INFO["lon"] = real_hdul.header["SITELONG"]
 			if "SITEALT" in real_hdul.header and SITE_INFO["alt"] == -999:
-				SITE_INFO["alt"] = real_hdul.header["ALT-OBS"]
+				SITE_INFO["alt"] = real_hdul.header["SITEALT"]
+			if "SITEELEV" in real_hdul.header and SITE_INFO["alt"] == -999:
+				SITE_INFO["alt"] = real_hdul.header["SITEELEV"]
 
 		MJD.append(mid_photo_time)
 		BRIGHTNESS.append(target_brightness)
@@ -480,7 +544,6 @@ for data_set in COMBINED_DATA:
 				site_loc = EarthLocation.from_geodetic(lon=SITE_INFO["lon"], lat=SITE_INFO["lat"], height=SITE_INFO["alt"])
 				this_time = Time(MIN_JD + data_set[0], format="jd", scale="utc", location=site_loc)
 				htime_corr = this_time.light_travel_time(TARGET_SKYCOORD, "heliocentric")
-				print("time check,", MIN_JD + data_set[0], this_time)
 
 				# JD, HJD, brightness, brightness uncertainty
 				current_line += f"\n{this_time},{this_time + htime_corr},{data_set[1]},{data_set[2]}"
@@ -496,7 +559,7 @@ ax.set_title(f"Time-series flux of {STAR_NAME} in the filter {FILTER}", fontsize
 ax.plot(MJD, BRIGHTNESS, color="green", linewidth=1.5, alpha=0.25)
 ax.scatter(MJD, BRIGHTNESS, marker="o", color="green", s=15)
 ax.errorbar(MJD, BRIGHTNESS, yerr=BRIGHTNESS_UNCRT, linewidth=0, elinewidth=1.5, ecolor="#333")
-ax.set_xlabel(f"Time since {MIN_JD} MJD (Days)", fontsize=13)
+ax.set_xlabel(f"Time since {MIN_JD} JD (Days)", fontsize=13)
 ax.set_ylabel(ylabel, fontsize=13)
 ax.invert_yaxis()
 
