@@ -1,6 +1,6 @@
 # Get a lightcurve from a folder of FITs files
 
-import sep_pjw as sep
+import sep
 from astropy.io import fits
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
@@ -59,7 +59,7 @@ SITE_INFO = {
 	"lat": -999,
 	"lon": -999,
 	"alt": -999
-	}
+}
 
 if USE_CLI_ARGS:
 	TARGET_RA, TARGET_DEC = "", ""
@@ -171,26 +171,8 @@ if EXPORT_FILE == "WebObs":
 	print("Note: the first \"comp\" star is actually a check star")
 print()
 
-# gets the average background in an annulus with inner radius r and outer radius r + dr
-def sky_bg_from_annulus(data, cx, cy, r, dr):
-	small_mask = np.zeros(data.shape, dtype=bool)
-	big_mask = np.zeros(data.shape, dtype=bool)
-	sep.mask_ellipse(small_mask, [cx], [cy], [r], [r], [0])
-	sep.mask_ellipse(big_mask, [cx], [cy], [r+dr], [r+dr], [0])
-	annulus_mask = np.logical_xor(small_mask, big_mask)
-	annulus_pixels = []
-	for y in range(int(cy - (r + dr) - 1), int(cy + (r + dr) + 2)):
-		for x in range(int(cx - (r + dr) - 1), int(cx + (r + dr) + 2)):
-			if annulus_mask[y][x] == True and not math.isnan(data[y][x]):
-				annulus_pixels.append(data[y][x])
-	cutoff = np.percentile(annulus_pixels, 95)
-	for i in range(len(annulus_pixels)-1, -1, -1):
-		if annulus_pixels[i] > cutoff:
-			del annulus_pixels[i]
-	return np.mean(annulus_pixels)
-
 # get square slice in 2d array
-def getSquareSlice(data, center_x, center_y, side_length):
+def get_square_slice(data, center_x, center_y, side_length):
 	data_shape = data.shape
 	slice_x = [int(center_x - side_length/2), int(center_x + side_length/2)]
 	slice_y = [int(center_y - side_length/2), int(center_y + side_length/2)]
@@ -206,7 +188,8 @@ def getSquareSlice(data, center_x, center_y, side_length):
 			elif slice_y[i] < 0:
 				slice_y[i] = 0
 	sliced = data[slice_y[0] : slice_y[1], slice_x[0] : slice_x[1]]
-	return copy.deepcopy(sliced)
+	sliced = copy.deepcopy(sliced)
+	return { "top_left_x": slice_x[0], "top_left_y": slice_y[0], "data": sliced }
 
 TARGET_SKYCOORD = None
 if TARGET_RA != "":
@@ -254,9 +237,6 @@ for file_name in fits_filenames:
 			continue
 		print("Opening file path", file_path)
 
-		use_wcs = True
-		this_wcs = WCS(real_hdul.header)
-
 		# switch to little endian byte order
 		fits_data = real_hdul.data.astype(np.float32)
 		if real_hdul.data.dtype.byteorder == ">":
@@ -267,7 +247,8 @@ for file_name in fits_filenames:
 			fits_data = real_hdul.data.byteswap()
 			fits_data = fits_data.view(fits_data.dtype.newbyteorder("<"))
 
-		sep_bkg = sep.Background(fits_data)
+		use_wcs = True
+		this_wcs = WCS(real_hdul.header)
 
 		if this_wcs.wcs.ctype[0] != "":
 			target_x, target_y = this_wcs.world_to_pixel(TARGET_SKYCOORD)
@@ -275,40 +256,39 @@ for file_name in fits_filenames:
 			use_wcs = False
 			target_x, target_y = TARGET_PIX
 
-		loc_sky_bg = sky_bg_from_annulus(fits_data, target_x, target_y, 20, 5)
-		if VERBOSE == True:
-			print("Target star\nLocal sky background", loc_sky_bg)
-		loc_fits_data = fits_data - loc_sky_bg
+		sep_bkg = sep.Background(fits_data)
+		fits_data = fits_data - sep_bkg
 
-		target_x, target_y, _ = sep.winpos(loc_fits_data, [target_x], [target_y], [3.33])
-		target_x = target_x[0]
-		target_y = target_y[0]
-		if VERBOSE == True:
-			print("Position: x=", target_x, ", y=", target_y)
+		# the data is now switched to the 100x100 crop on the center of the target
+		loc_fits_data = get_square_slice(fits_data, target_x, target_y, 100)
 
-		loc_fits_data = getSquareSlice(loc_fits_data, target_x, target_y, 100)
-
-		sources = sep.extract(loc_fits_data, 2.25, err=sep_bkg.globalrms, minarea=15)
+		sources = sep.extract(loc_fits_data["data"], 2.25, err=sep_bkg.globalrms, minarea=15)
 
 		target_i = -1 # index of the target star
 		for i in range(len(sources["thresh"])):
-			dist = math.sqrt((sources["x"][i] - 50)**2 + (sources["y"][i] - 50)**2)
-			if dist < 2:
+			dist = math.sqrt((sources["x"][i] - (target_x - loc_fits_data["top_left_x"]))**2 +
+					((sources["y"][i] - (target_y - loc_fits_data["top_left_y"]))**2))
+			if dist < 4:
 				target_i = i
 				if sources["flag"][i] > 1:
 					raise ValueError("SEP raised unexpected flag for target: ", sources["flag"][i])
 				break
 		if target_i == -1:
-			raise ValueError("SEP could not detect target star above threshold!")
+			print("\033[1;31;40m~~~\nSEP could not detect target star above threshold! Please check the above image; photometry will continue without it.\n~~~\033[0m")
+			continue
+		target_x = sources["x"][target_i]
+		target_y = sources["y"][target_i]
+		if VERBOSE == True:
+			print("Target star\nPosition: x=", target_x+loc_fits_data["top_left_x"], ", y=", target_y+loc_fits_data["top_left_y"])
 		# scale a and b parameters
-		target_a = 2.5 * sources["a"][target_i]
-		target_b = 2.5 * sources["b"][target_i]
+		target_a = 3 * sources["a"][target_i]
+		target_b = 3 * sources["b"][target_i]
 		target_th = sources["theta"][target_i]
 
 		if VERBOSE == True:
 			print("Ellipse parameters: a=", target_a, ", b=", target_b, ", theta=", target_th)
 
-		target_flux, target_err, t_flag = sep.sum_ellipse(loc_fits_data, [sources["x"][target_i]], [sources["y"][target_i]],
+		target_flux, target_err, t_flag = sep.sum_ellipse(loc_fits_data["data"], [target_x], [target_y],
 			[target_a], [target_b], [target_th], err=sep_bkg.globalrms, subpix=10)
 
 		if t_flag[0] != 0:
@@ -320,9 +300,13 @@ for file_name in fits_filenames:
 		if VERBOSE == True:
 			print("Flux: ", target_flux, "+/-", target_err, "\n")
 
+		target_x += loc_fits_data["top_left_x"]
+		target_y += loc_fits_data["top_left_y"]
+
 		target_brightness = 0 # target brightness
 		target_uncrt = 0 # target uncertainty
 		mat_patches = [] # matplotlib patches
+		panic_continue = False
 		for i in range(max(len(COMPS_SKYCOORD), len(COMPS_PIX))):
 			if use_wcs:
 				comp_coord = COMPS_SKYCOORD[i]
@@ -330,40 +314,37 @@ for file_name in fits_filenames:
 			else:
 				comp_x, comp_y = COMPS_PIX[i]
 
-			loc_sky_bg = sky_bg_from_annulus(fits_data, comp_x, comp_y, 12, 5)
-			if VERBOSE == True:
-				print("Comparison star", i+1)
-				print("Local sky background:", loc_sky_bg)
-			loc_fits_data = fits_data - loc_sky_bg
-			comp_x, comp_y, cpos_flag = sep.winpos(loc_fits_data, [comp_x], [comp_y], [3])
-			comp_x = comp_x[0]
-			comp_y = comp_y[0]
-			COMPS_PIX[i] = [comp_x, comp_y]
-			if VERBOSE == True:
-				print("Location: x=", comp_x, ", y=", comp_y)
+			# the data is now switched to the 100x100 crop on the center of the comp
+			loc_fits_data = get_square_slice(fits_data, comp_x, comp_y, 100)
 
-			loc_fits_data = getSquareSlice(loc_fits_data, comp_x, comp_y, 100)
+			sources = sep.extract(loc_fits_data["data"], 2.25, err=sep_bkg.globalrms, minarea=15)
 
-			sources = sep.extract(loc_fits_data, 2.25, err=sep_bkg.globalrms, minarea=15)
-
-			comp_i = -1 # index of the target star
+			comp_i = -1 # index of the comp star
 			for ii in range(len(sources["thresh"])):
-				dist = math.sqrt((sources["x"][ii] - 50)**2 + (sources["y"][ii] - 50)**2)
-				if dist < 2:
+				dist = math.sqrt((sources["x"][ii] - (comp_x - loc_fits_data["top_left_x"]))**2 +
+					((sources["y"][ii] - (comp_y - loc_fits_data["top_left_y"]))**2))
+				if dist < 4:
 					comp_i = ii
 					if sources["flag"][ii] > 1:
-						raise ValueError("SEP raised unexpected flag for target: ", sources["flag"][ii])
+						raise ValueError("SEP raised unexpected flag for comparison star: ", sources["flag"][ii])
 					break
 			if comp_i == -1:
-				raise ValueError("SEP could not detect target star above threshold!")
+				panic_continue = True
+				print(f"\033[1;31;40m~~~\nSEP could not detect comparison star {i+1} above threshold! Please check the above image; photometry will continue without it.\n~~~\033[0m")
+				break
 
-			# scale a and b parameters
-			comp_a = 2.5 * sources["a"][comp_i]
-			comp_b = 2.5 * sources["b"][comp_i]
+			comp_x = sources["x"][comp_i]
+			comp_y = sources["y"][comp_i]
 			if VERBOSE == True:
-				print("Ellipse parameters: a=", comp_x, ", b=", comp_y, ", theta=", sources["theta"][comp_i])
+				print("Comparison star", i+1)
+				print("Location: x=", comp_x+loc_fits_data["top_left_x"], ", y=", comp_y+loc_fits_data["top_left_y"])
+			# scale a and b parameters
+			comp_a = 3 * sources["a"][comp_i]
+			comp_b = 3 * sources["b"][comp_i]
+			if VERBOSE == True:
+				print("Ellipse parameters: a=", comp_a, ", b=", comp_b, ", theta=", sources["theta"][comp_i])
 
-			comp_flux, comp_err, c_flag = sep.sum_ellipse(loc_fits_data, [sources["x"][comp_i]], [sources["y"][comp_i]],
+			comp_flux, comp_err, c_flag = sep.sum_ellipse(loc_fits_data["data"], [comp_x], [comp_y],
 				[comp_a], [comp_b], [sources["theta"][comp_i]], err=sep_bkg.globalrms, subpix=10)
 			if c_flag[0] !=0:
 				raise ValueError(f"SEP raised a non-zero flag with comp star {i+1} aperture photometry:", c_flag[0])
@@ -371,6 +352,9 @@ for file_name in fits_filenames:
 			comp_err = comp_err[0]
 			if VERBOSE == True:
 				print("Flux: ", comp_flux, "+/-", comp_err)
+
+			comp_x += loc_fits_data["top_left_x"]
+			comp_y += loc_fits_data["top_left_y"]
 
 			# calculate instrumental mags for webobs export
 			if EXPORT_FILE == "WebObs":
@@ -403,19 +387,21 @@ for file_name in fits_filenames:
 				mat_patches.append(circ2)
 		target_uncrt = math.sqrt(target_uncrt)
 
-		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 0.02:
+		if RANDOM_INSPECTION == True and random.uniform(0, 1) < 2/len(fits_filenames):
 			mean, stdev = np.mean(fits_data), np.std(fits_data)
 			fig = plt.figure(figsize=(8, 6))
 			ax = fig.add_subplot()
 			ax.set_title("Sample image showing target (green) and comparison (blue) stars")
-			im1 = ax.imshow(fits_data, interpolation="nearest", vmin=mean-3*stdev, vmax=mean+3*stdev, cmap="gray", origin="lower")
+			im1 = ax.imshow(fits_data, interpolation="nearest", vmin=0, vmax=mean+3*stdev, cmap="gray", origin="lower")
 			fig.colorbar(im1)
-			circ = Ellipse(xy=(target_x, target_y), width=2*target_a, height=2*target_b, angle=target_th*180./3.1415, color="g", fill=False)
+			circ = Ellipse(xy=(target_x, target_y), width=2*target_a, height=2*target_b, angle=target_th*57.39578, color="g", fill=False)
 			ax.add_patch(circ)
 			for p in mat_patches:
 				ax.add_patch(p)
 			plt.show()
 			RANDOM_INSPECTION = False
+		if panic_continue == True:
+			continue
 
 		mid_photo_time = 0
 		if "DATE-AVG" in real_hdul.header:
@@ -487,7 +473,7 @@ if EXPORT_FILE != False:
 	with open(EXPORT_PATH, "a") as data_file:
 		file_string = ""
 		if EXPORT_FILE == "WebObs":
-			file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of January 18, 2025)\n"
+			file_string = f"#TYPE=EXTENDED\n#OBSCODE={AAVSO_OBSCODE}\n#SOFTWARE=https://github.com/denis-3/SEP-Photometer  (Revision of February 28, 2025)\n"
 			file_string += "#DELIM=,\n#DATE=JD\n#OBSTYPE=CCD\n"
 			if other_star_qtty == 3:
 				file_string += f"#The comparison stars used are {COMPS_NAMES[1]} and {COMPS_NAMES[2]}\n"
@@ -509,7 +495,7 @@ for data_set in COMBINED_DATA:
 		with open(EXPORT_PATH, "a") as data_file:
 			current_line = ""
 			if EXPORT_FILE == "WebObs":
-				current_line = f"\n{STAR_NAME},{MIN_JD, data_set[0]},"
+				current_line = f"\n{STAR_NAME},{MIN_JD+data_set[0]},"
 				mag_to_write = data_set[1]
 				mag_err_to_write = data_set[2]
 				# if standardized magnitudes are not available, we use differential magnitude
@@ -518,7 +504,7 @@ for data_set in COMBINED_DATA:
 					mag_err_to_write = 2.5 / math.log(10) * data_set[2]
 				current_line += "%.3f" % mag_to_write
 				current_line += ","
-				current_line += "%.6f" % mag_err_to_write
+				current_line += "%.4f" % mag_err_to_write
 				current_line += f",{AAVSO_FILTER},NO,"
 				if MAG_MODE == True:
 					current_line += "STD"
@@ -527,11 +513,11 @@ for data_set in COMBINED_DATA:
 
 				# comps and check star listing
 				if len(COMPS_RA) == 1:
-					current_line += f",{COMPS_NAMES[0]},{data_set[5][0]},na,na"
+					current_line += f",{COMPS_NAMES[0]},{"%.3f" % data_set[5][0]},na,na"
 				elif len(COMPS_RA) == 2:
-					current_line += f",{COMPS_NAMES[1]},{data_set[5][1]},{COMPS_NAMES[0]},{data_set[5][0]}"
+					current_line += f",{COMPS_NAMES[1]},{"%.3f" % data_set[5][1]},{COMPS_NAMES[0]},{"%.3f" % data_set[5][0]}"
 				elif len(COMPS_RA) > 2:
-					current_line += f",ENSEMBLE,na,{COMPS_NAMES[0]},{data_set[5][0]}"
+					current_line += f",ENSEMBLE,na,{COMPS_NAMES[0]},{"%.3f" % data_set[5][0]}"
 				current_line += f",{data_set[3]},na,{AAVSO_CHART}," # airmass, group, AAVSO chart ID
 				# add notes now
 				current_line += "VMAGINS=" + "%.3f" % data_set[4]
