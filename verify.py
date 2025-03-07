@@ -15,6 +15,7 @@ BRIGHTNESS_ADJUST = 0
 # K for Known
 K_PHASE = []
 K_BRIGHTNESS = []
+K_TIME = []
 # O for Observed
 O_PHASE = []
 O_BRIGHTNESS = []
@@ -36,6 +37,7 @@ for i in range(len(files)):
 		if i == 0:
 			K_PHASE.append(this_phase)
 			K_BRIGHTNESS.append(this_brightness)
+			K_TIME.append(this_time)
 		elif i == 1:
 			O_PHASE.append(this_phase)
 			O_BRIGHTNESS.append(this_brightness + BRIGHTNESS_ADJUST)
@@ -48,8 +50,8 @@ print("Successfully parsed", len(K_PHASE) + len(O_PHASE), "entries")
 fig = plt.figure(figsize=(9, 5))
 ax = fig.add_subplot()
 ax.set_title("Period fold", fontsize=16)
-ax.scatter(K_PHASE, K_BRIGHTNESS, marker="o", color="grey", s=15)
-ax.scatter(O_PHASE, O_BRIGHTNESS, marker="o", color="pink", s=15)
+ax.scatter(K_PHASE, K_BRIGHTNESS, marker="o", c=K_TIME, cmap="copper", s=15)
+ax.scatter(O_PHASE, O_BRIGHTNESS, marker="o", color="green", s=15)
 ax.set_xlabel("Phase", fontsize=13)
 ax.set_ylabel("Magnitude", fontsize=13)
 ax.invert_yaxis()

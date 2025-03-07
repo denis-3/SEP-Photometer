@@ -224,7 +224,7 @@ if len(COMPS_PIX) < len(COMPS_SKYCOORD):
 		COMPS_PIX.append([-1, -1])
 
 for file_name in fits_filenames:
-	if not file_name.endswith((".fits", ".fits.fz")):
+	if not file_name.endswith((".fits", ".fits.fz", ".fit")):
 		continue
 	file_path = FILE_FOLDER_PATH + file_name
 	with fits.open(file_path) as hdul:
@@ -532,7 +532,7 @@ for data_set in COMBINED_DATA:
 				htime_corr = this_time.light_travel_time(TARGET_SKYCOORD, "heliocentric")
 
 				# JD, HJD, brightness, brightness uncertainty
-				current_line += f"\n{this_time},{this_time + htime_corr},{data_set[1]},{data_set[2]}"
+				current_line += f"\n{this_time},{this_time.utc + htime_corr},{data_set[1]},{data_set[2]}"
 			data_file.write(current_line)
 
 print("Displaying chart...")
