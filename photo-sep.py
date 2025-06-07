@@ -271,7 +271,7 @@ for file_name in fits_filenames:
 			if dist < 4:
 				target_i = i
 				if sources["flag"][i] > 1:
-					raise ValueError("SEP raised unexpected flag for target: ", sources["flag"][i])
+					print("SEP raised unexpected flag for target: ", sources["flag"][i])
 				break
 		if target_i == -1:
 			print("\033[1;31;40m~~~\nSEP could not detect target star above threshold! Please check the above image; photometry will continue without it.\n~~~\033[0m")
@@ -448,6 +448,9 @@ for file_name in fits_filenames:
 if EXPORT_FILE == "CSV":
 	print("Got this observervation site info:", SITE_INFO)
 
+if (len(MJD) == 0):
+	raise ValueError("No FITS files have been photometered! Have you set the correct filter name and file path?")
+
 # sort all the data points by MJD so it can be displayed easily
 COMBINED_DATA = []
 MIN_JD = min(MJD)
@@ -527,12 +530,16 @@ for data_set in COMBINED_DATA:
 					current_line += "|KREFMAG=" + "%.3f" % COMPS_MAGS[0]
 			elif EXPORT_FILE == "CSV":
 				# heliocentric correction
-				site_loc = EarthLocation.from_geodetic(lon=SITE_INFO["lon"], lat=SITE_INFO["lat"], height=SITE_INFO["alt"])
-				this_time = Time(MIN_JD + data_set[0], format="jd", scale="utc", location=site_loc)
-				htime_corr = this_time.light_travel_time(TARGET_SKYCOORD, "heliocentric")
+				helio_time = 0
+				this_time = MIN_JD + data_set[0]
+				if SITE_INFO["lon"] != -999:
+					site_loc = EarthLocation.from_geodetic(lon=SITE_INFO["lon"], lat=SITE_INFO["lat"], height=SITE_INFO["alt"])
+					this_time = Time(MIN_JD + data_set[0], format="jd", scale="utc", location=site_loc)
+					htime_corr = this_time.light_travel_time(TARGET_SKYCOORD, "heliocentric")
+					helio_time = this_time.utc + htime_corr
 
 				# JD, HJD, brightness, brightness uncertainty
-				current_line += f"\n{this_time},{this_time.utc + htime_corr},{data_set[1]},{data_set[2]}"
+				current_line += f"\n{this_time},{helio_time},{data_set[1]},{data_set[2]}"
 			data_file.write(current_line)
 
 print("Displaying chart...")

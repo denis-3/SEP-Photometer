@@ -31,6 +31,9 @@ for i in range(len(files)):
 		try:
 			this_time = float(splitted[JD_COLUMN[i] - 1])
 			this_brightness = float(splitted[BRIGHTNESS_COLUMN[i] - 1])
+			# ASAS data sometimes sets magnitude to 99.99 for erroneous CSV lines
+			if this_brightness == 99.99:
+				continue
 		except ValueError:
 			continue
 		this_phase = ((this_time - KNOWN_EPOCH) / PERIOD) % 1
@@ -47,13 +50,15 @@ for i in range(len(files)):
 
 print("Successfully parsed", len(K_PHASE) + len(O_PHASE), "entries")
 
-fig = plt.figure(figsize=(9, 5))
+fig = plt.figure(figsize=(10, 5))
 ax = fig.add_subplot()
-ax.set_title("Period fold", fontsize=16)
-ax.scatter(K_PHASE, K_BRIGHTNESS, marker="o", c=K_TIME, cmap="copper", s=15)
+lit_scatter = ax.scatter(K_PHASE, K_BRIGHTNESS, marker="o", c=K_TIME, cmap="copper", s=15)
 ax.scatter(O_PHASE, O_BRIGHTNESS, marker="o", color="green", s=15)
 ax.set_xlabel("Phase", fontsize=13)
 ax.set_ylabel("Magnitude", fontsize=13)
 ax.invert_yaxis()
+
+cbar = fig.colorbar(lit_scatter, ax=ax)
+cbar.set_label("HJD")
 
 plt.show()
